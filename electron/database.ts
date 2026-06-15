@@ -239,6 +239,75 @@ function createTables(db: BetterSqlite3.Database) {
       created_at TEXT DEFAULT (datetime('now'))
     );
 
+    -- ============================================================
+    -- 叙事一致性 (Narrative Consistency) —— Canon Store
+    -- ============================================================
+    -- 结构化时间线事件
+    CREATE TABLE IF NOT EXISTS canon_timeline_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chapter_number INTEGER NOT NULL,
+      sequence INTEGER NOT NULL,
+      characters TEXT DEFAULT '[]',
+      location TEXT DEFAULT '',
+      time_flow TEXT DEFAULT 'sequential',
+      summary TEXT DEFAULT '',
+      impact TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_canon_timeline_chapter_seq
+      ON canon_timeline_events(chapter_number, sequence);
+
+    -- 角色状态历史（每个角色每个章节一条最新）
+    CREATE TABLE IF NOT EXISTS canon_character_state (
+      character TEXT PRIMARY KEY,
+      location TEXT DEFAULT '',
+      power_level TEXT DEFAULT '',
+      physical_state TEXT DEFAULT '',
+      mental_state TEXT DEFAULT '',
+      key_items TEXT DEFAULT '',
+      current_goal TEXT DEFAULT '',
+      knowledge_json TEXT DEFAULT '[]',
+      relationships_json TEXT DEFAULT '{}',
+      recent_events TEXT DEFAULT '',
+      updated_at_chapter INTEGER DEFAULT 0,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    -- 长期未结剧情线
+    CREATE TABLE IF NOT EXISTS canon_plot_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      status TEXT DEFAULT 'active',
+      started_at INTEGER DEFAULT 0,
+      last_advanced_at INTEGER DEFAULT 0,
+      resolved_at INTEGER,
+      characters TEXT DEFAULT '[]',
+      current_state TEXT DEFAULT '',
+      description TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_canon_plot_status ON canon_plot_lines(status);
+
+    -- 客观事实条目
+    CREATE TABLE IF NOT EXISTS canon_facts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      category TEXT NOT NULL,
+      statement TEXT NOT NULL,
+      introduced_at INTEGER DEFAULT 0,
+      characters TEXT DEFAULT '[]',
+      evidence TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_canon_facts_category ON canon_facts(category);
+
+    -- 章节摘要（结构化）
+    CREATE TABLE IF NOT EXISTS canon_chapter_summaries (
+      chapter_number INTEGER PRIMARY KEY,
+      title TEXT DEFAULT '',
+      summary TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
     -- 索引
     CREATE INDEX IF NOT EXISTS idx_llm_calls_time ON llm_calls(created_at);
   `)

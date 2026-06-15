@@ -13,6 +13,14 @@ import { PostProcessRepository } from '../repositories/post-process-repository'
 // 沿用的旧表
 import { LLMHistoryRepository } from '../repositories/llm-repository'
 import { SummaryRepository } from '../repositories/summary-repository'
+import { CanonRepository } from '../repositories/canon-repository'
+import type {
+  TimelineEvent,
+  CharacterStateSnapshot,
+  PlotLine,
+  Fact,
+  ChapterSummary,
+} from '../../src/services/narrative-consistency/types'
 
 export function registerDatabaseController() {
   ipcMain.handle('db:close', async () => {
@@ -342,5 +350,99 @@ ipcMain.handle('db:revision-create', async (_event, params: {
 
   ipcMain.handle('db:get-latest-summary', async () => {
     return SummaryRepository.getLatestSnapshot()
+  })
+
+  // ============================================================
+  // Canon Store —— 叙事一致性持久化
+  // ============================================================
+
+  // 时间线
+  ipcMain.handle('db:canon-timeline-get', async (_event, maxChapter: number, includeFlashback?: boolean) => {
+    return CanonRepository.getTimelineUpTo(maxChapter, includeFlashback !== false)
+  })
+  ipcMain.handle('db:canon-timeline-get-chapter', async (_event, chapterNumber: number) => {
+    return CanonRepository.getTimelineByChapter(chapterNumber)
+  })
+  ipcMain.handle('db:canon-timeline-append', async (_event, event: Omit<TimelineEvent, 'id' | 'createdAt'>) => {
+    try {
+      const id = CanonRepository.appendTimelineEvent(event)
+      return { success: true, id }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+  ipcMain.handle('db:canon-timeline-clear-chapter', async (_event, chapterNumber: number) => {
+    CanonRepository.clearChapterTimeline(chapterNumber)
+    return { success: true }
+  })
+
+  // 角色状态
+  ipcMain.handle('db:canon-character-state-get-all', async () => {
+    return CanonRepository.getAllCharacterStates()
+  })
+  ipcMain.handle('db:canon-character-state-get', async (_event, character: string) => {
+    return CanonRepository.getCharacterState(character)
+  })
+  ipcMain.handle('db:canon-character-state-upsert', async (_event, snapshot: CharacterStateSnapshot) => {
+    try {
+      CanonRepository.upsertCharacterState(snapshot)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  // 剧情线
+  ipcMain.handle('db:canon-plot-list', async (_event, status?: PlotLine['status']) => {
+    return CanonRepository.getPlotLines(status ? { status } : undefined)
+  })
+  ipcMain.handle('db:canon-plot-add', async (_event, line: Omit<PlotLine, 'id'>) => {
+    try {
+      const id = CanonRepository.addPlotLine(line)
+      return { success: true, id }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+  ipcMain.handle('db:canon-plot-advance', async (_event, id: number, currentState: string, lastAdvancedAt: number) => {
+    CanonRepository.advancePlotLine(id, currentState, lastAdvancedAt)
+    return { success: true }
+  })
+  ipcMain.handle('db:canon-plot-resolve', async (_event, id: number, chapterNumber: number) => {
+    CanonRepository.resolvePlotLine(id, chapterNumber)
+    return { success: true }
+  })
+
+  // 事实
+  ipcMain.handle('db:canon-fact-list', async () => {
+    return CanonRepository.getFacts()
+  })
+  ipcMain.handle('db:canon-fact-add', async (_event, fact: Omit<Fact, 'id'>) => {
+    try {
+      const id = CanonRepository.addFact(fact)
+      return { success: true, id }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+  ipcMain.handle('db:canon-fact-clear-chapter', async (_event, chapterNumber: number) => {
+    CanonRepository.clearChapterFacts(chapterNumber)
+    return { success: true }
+  })
+
+  // 章节摘要
+  ipcMain.handle('db:canon-summary-get', async (_event, chapterNumber: number) => {
+    return CanonRepository.getSummary(chapterNumber)
+  })
+  ipcMain.handle('db:canon-summary-list-recent', async (_event, limit?: number) => {
+    return CanonRepository.getRecentSummaries(limit ?? 5)
+  })
+  ipcMain.handle('db:canon-summary-upsert', async (_event, summary: ChapterSummary) => {
+    try {
+      CanonRepository.upsertSummary(summary)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
   })
 }

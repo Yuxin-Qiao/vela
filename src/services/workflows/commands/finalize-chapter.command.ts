@@ -12,6 +12,7 @@ import {
   type PostProcessStep,
 } from '../workflow-utils'
 import type { ChapterInfo } from '../chapter-workflow'
+import { extractAndWriteback, runConsistencyGate, buildCanonContext } from '../../narrative-consistency'
 
 export interface FinalizeChapterParams {
   draftPath: string
@@ -124,11 +125,99 @@ export function buildFinalizePostProcessSteps(
         // 写入蓝图 JSON 的 notes 字段
         await ipc.invoke('db:blueprint-update-notes', chapterNumber, cleanNotes)
         callbacks.log('✅ 本章剧情要点提取完成（已写入蓝图）')
+
+        // [Canon] 同步写入章节级结构化摘要，供下一次生成引用
+        try {
+          await ipc.invoke('db:canon-summary-upsert', {
+            chapterNumber,
+            title: chapterTitle,
+            summary: cleanNotes,
+            createdAt: new Date().toISOString(),
+          })
+          callbacks.log('  🛡️ [Canon] 结构化摘要已写入 Canon Store')
+        } catch (e) {
+          callbacks.log(`  ⚠️ [Canon] 摘要写入失败：${String(e)}`)
+        }
       },
     })
   }
 
-  // ─── 步骤 3: 角色状态更新 ────────────────────────────────────────
+  // ─── 步骤 2.5: [Canon] 写回 —— 把本章提取为结构化时间线/角色/事实/剧情线 ────
+  steps.push({
+    key: 'canon_writeback',
+    label: '🛡️ [Canon] 叙事一致性写回',
+    critical: false,
+    executor: async (callbacks) => {
+      try {
+        const [allChars, blueprint] = await Promise.all([
+          ipc.invoke('db:character-get-all').catch(() => [] as Array<{ name: string; role: string; currentState?: { location?: string; powerLevel?: string; physicalState?: string; mentalState?: string; keyItems?: string; recentEvents?: string } }>),
+          ipc.invoke('db:blueprint-get', chapterNumber).catch(() => null as null | { keyEvents?: string; characters?: string[]; suspenseHook?: string }),
+        ])
+        // 取出已生成的 notes 作为摘要来源
+        const notes = await ipc.invoke('db:canon-summary-get', chapterNumber).catch(() => null as null | { summary?: string }) || null
+        const existingNotes = notes?.summary || ''
+        const result = await extractAndWriteback({
+          chapterNumber,
+          chapterTitle,
+          chapterContent: draftContent,
+          characters: (allChars || []).map(c => ({
+            name: c.name,
+            role: c.role,
+            currentState: c.currentState,
+          })),
+          chapterBlueprint: blueprint ? {
+            keyEvents: blueprint.keyEvents,
+            characters: blueprint.characters,
+            suspenseHook: blueprint.suspenseHook,
+          } : undefined,
+          existingNotes,
+        })
+        if (result.ok) {
+          callbacks.log(`  🛡️ [Canon] 写回成功（事件 ${(blueprint as unknown as { keyEvents?: string })?.keyEvents ? '已抽取' : '见正文'}）`)
+        } else if (result.errors.length > 0) {
+          callbacks.log(`  ⚠️ [Canon] 写回部分失败（${result.errors.length} 项）：${result.errors.slice(0, 3).join('；')}`)
+        }
+      } catch (e) {
+        callbacks.log(`  ⚠️ [Canon] 写回异常：${String(e)}`)
+      }
+    },
+  })
+
+    // ─── 步骤 2.6: [Compression v3] 长期记忆压缩（每5章执行一次）──────────
+  if (chapterNumber % 5 === 0) {
+    steps.push({
+      key: 'canon_compression',
+      label: '🧠 [Compression] 长期记忆压缩',
+      critical: false,
+      executor: async (callbacks: any) => {
+        try {
+          const { canonStore } = await import('../../narrative-consistency/canon-store');
+          const recent = await canonStore.getRecentSummaries(20);
+          if (recent.length < 5) {
+            callbacks.log('  ℹ️ [Compression] 不足5章，跳过压缩');
+            return;
+          }
+          // 将前15章合并为压缩摘要
+          const oldSummaries = recent.slice(0, 15);
+          const compressed = oldSummaries
+            .map((s: any) => '第' + s.chapterNumber + '章：' + (s.summary || '').slice(0, 80))
+            .join(' | ');
+          callbacks.log(`  🧠 [Compression] 已压缩 ${oldSummaries.length} 章为长期记忆摘要（${compressed.length} 字）`);
+          // 写入压缩后的 canonical summary
+          await ipc.invoke('db:canon-summary-upsert', {
+            chapterNumber: -1, // 特殊标记：压缩摘要
+            title: `压缩摘要（1-第${chapterNumber}章）`,
+            summary: compressed,
+            createdAt: new Date().toISOString(),
+          });
+        } catch (e) {
+          callbacks.log(`  ⚠️ [Compression] 压缩异常：${String(e)}`);
+        }
+      },
+    });
+  }
+
+// ─── 步骤 3: 角色状态更新 ────────────────────────────────────────
   const cardTemplate = getPromptTemplate('update_character_cards')
   if (cardTemplate) {
     steps.push({
@@ -240,7 +329,7 @@ export class FinalizeChapterCommand extends BaseWorkflowCommand<void> {
     super()
   }
 
-  async execute({ callbacks }: CommandExecuteParams): Promise<void> {
+  async execute({ callbacks, context }: CommandExecuteParams): Promise<void> {
     const project = useProjectStore.getState().currentProject
     if (!project) throw new Error('未打开项目')
 
@@ -270,6 +359,55 @@ export class FinalizeChapterCommand extends BaseWorkflowCommand<void> {
 
     callbacks.log(`✅ 定稿内容已正式写入 SQLite 数据库并同步为根目录文件 (第${this.params.chapterNumber}章${safeTitle}.txt)`)
 
+    // ==========================================
+    // [Gate v2] 叙事一致性强制门禁 — 必须在后处理之前通过
+    // ==========================================
+        let gatedContent = refinedDraftText;
+    // Gate check
+    try {
+      const [core, allCharacters] = await Promise.all([
+        ipc.invoke('db:project-core-get').catch(() => null),
+        ipc.invoke('db:character-get-all').catch(() => []),
+      ]);
+      const canon = await buildCanonContext({
+        chapterNumber: this.params.chapterNumber,
+        architecture: {
+          premise: (core as any)?.premise || '',
+          charactersArch: (core as any)?.charactersArch || '',
+          worldbuilding: (core as any)?.worldbuilding || '',
+          synopsis: (core as any)?.synopsis || '',
+        },
+        characters: (allCharacters || []).map((c: any) => ({
+          name: c.name as string,
+          role: c.role as string,
+          currentState: c.currentState as any,
+        })),
+        chapterGoal: '定稿第' + this.params.chapterNumber + '章',
+        previousEnding: '',
+        ragContext: '',
+        writingStyle: project.novelConfig.writingStyle || '',
+        globalGuidance: project.novelConfig.globalGuidance || '',
+      });
+      const gateResult = await runConsistencyGate({
+        chapterNumber: this.params.chapterNumber,
+        chapterContent: gatedContent,
+        canon,
+        isRewrite: false,
+      });
+      callbacks.log('  [Gate] ' + gateResult.verdict + ': ' + gateResult.report);
+      if (gateResult.verdict === 'BLOCK') {
+        callbacks.log('  [Gate] BLOCKED - HIGH conflicts. Please refine and retry.');
+        return;
+      }
+      if (gateResult.verdict === 'REPAIR' && gateResult.repairedContent) {
+        gatedContent = gateResult.repairedContent;
+        callbacks.log('  [Gate] REPAIRED (' + gateResult.repairAttempts + ' attempts)');
+        await ipc.invoke('db:draft-update-content', dbDraft.id, gatedContent, gatedContent.length);
+      }
+    } catch (e) {
+      callbacks.log('  [Gate] error: ' + String(e));
+    }
+
     // 3. 通过 PostProcessPipeline 执行后处理（状态持久化 + 支持重试）
     callbacks.log('🚀 正在启动后台大模型推演系统更新全书状态...')
 
@@ -279,7 +417,7 @@ export class FinalizeChapterCommand extends BaseWorkflowCommand<void> {
       project,
       this.params.chapterNumber,
       this.params.chapterInfo.title,
-      refinedDraftText,
+      gatedContent,
     )
 
     await runPostProcessPipeline(project.path, scope, sourceLabel, steps, callbacks)

@@ -4,6 +4,14 @@ import { getPromptTemplate } from '../../prompt-templates'
 import { ChapterPromptBuilder } from '../../prompts/prompt-builder'
 import { ipc } from '../../ipc-client'
 
+import {
+  buildCanonContext,
+  renderCanonContext,
+  validateChapter,
+  tryAutoFix,
+  issuesToWarnings,
+} from '../../narrative-consistency'
+
 
 export interface RefineFromReviewParams {
   draftPath: string
@@ -19,7 +27,7 @@ export class RefineFromReviewCommand extends BaseWorkflowCommand<string> {
     super()
   }
 
-  async execute({ callbacks }: CommandExecuteParams): Promise<string> {
+  async execute({ callbacks, context }: CommandExecuteParams): Promise<string> {
     const project = useProjectStore.getState().currentProject
     if (!project) throw new Error('未打开项目')
 
@@ -38,8 +46,79 @@ export class RefineFromReviewCommand extends BaseWorkflowCommand<string> {
       .withGlobalGuidance(project.novelConfig.globalGuidance || '')
       .withUserRefinePrompt(userPromptBlock)
 
+    // ==========================================
+    // [Canon] 注入叙事一致性上下文（审稿修复时绝不破坏既有事实）
+    // ==========================================
+    try {
+      const [core, allCharacters] = await Promise.all([
+        ipc.invoke('db:project-core-get').catch(() => null as null | { premise?: string; charactersArch?: string; worldbuilding?: string; synopsis?: string }),
+        ipc.invoke('db:character-get-all').catch(() => [] as Array<{ name: string; role: string; currentState?: { location?: string; powerLevel?: string; physicalState?: string; mentalState?: string; keyItems?: string; recentEvents?: string; updatedAtChapter?: number } }>),
+      ])
+      const canon = await buildCanonContext({
+        chapterNumber: this.params.chapterNumber,
+        architecture: {
+          premise: core?.premise || '',
+          charactersArch: core?.charactersArch || '',
+          worldbuilding: core?.worldbuilding || '',
+          synopsis: core?.synopsis || '',
+        },
+        characters: (allCharacters || []).map(c => ({
+          name: c.name,
+          role: c.role,
+          currentState: c.currentState,
+        })),
+        chapterGoal: `第${this.params.chapterNumber}章审稿修复`,
+        previousEnding: '',
+        ragContext: '',
+        writingStyle: project.novelConfig.writingStyle || '',
+        globalGuidance: project.novelConfig.globalGuidance || '',
+      })
+      promptBuilder.withCanonContext(renderCanonContext(canon))
+      callbacks.log(`  🛡️ [Canon] 审稿修复已注入一致性上下文（时间线 ${canon.timeline.length} / 角色 ${canon.characterStates.length}）`)
+      ;(context.data as Record<string, unknown>).__canonForReviewRefine = canon
+    } catch (e) {
+      callbacks.log(`  ⚠️ [Canon] 审稿修复上下文构造失败：${String(e)}`)
+    }
+
     const refined = await this.callLLMWithBuilder(promptBuilder, callbacks)
     const cleanRefined = this.stripThinkingTags(refined)
+
+    // ==========================================
+    // [Canon] 审稿修复后一致性校验（isRewrite=true）
+    // ==========================================
+    let finalRefined = cleanRefined
+    const canonForReviewRefine = (context.data as Record<string, unknown>).__canonForReviewRefine as import('../../narrative-consistency').CanonContext | undefined
+    if (canonForReviewRefine) {
+      try {
+        const issues = validateChapter({
+          chapterNumber: this.params.chapterNumber,
+          chapterContent: cleanRefined,
+          canon: canonForReviewRefine,
+          isRewrite: true,
+        })
+        const autoFixResult = tryAutoFix(cleanRefined, issues)
+        if (autoFixResult.modified && autoFixResult.content) {
+          finalRefined = autoFixResult.content
+          callbacks.log(`  🛡️ [Canon] 审稿修复自动修复 ${autoFixResult.fixedIssues.length} 处一致性问题`)
+        }
+        const remaining = autoFixResult.remainingIssues
+        if (remaining.length > 0) {
+          callbacks.log(`  ⚠️ [Canon] 审稿修复残留 ${remaining.length} 处一致性提示（不影响保存）`)
+          context.data.consistencyWarnings = remaining
+        } else if (issues.length > 0) {
+          callbacks.log(`  ✅ [Canon] ${issues.length} 处审稿修复一致性问题已自动修复`)
+        } else {
+          callbacks.log(`  ✅ [Canon] 审稿修复一致性检查通过`)
+        }
+        context.data.consistencyReport = {
+          totalIssues: issues.length,
+          autoFixed: autoFixResult.fixedIssues.length,
+          remaining: remaining.length,
+        }
+      } catch (e) {
+        callbacks.log(`  ⚠️ [Canon] 审稿修复校验异常：${String(e)}`)
+      }
+    }
 
     const { parseDraftMeta } = await import('../chapter-workflow')
     const baseDraft = await parseDraftMeta(this.params.draftPath)
@@ -75,7 +154,7 @@ export class RefineFromReviewCommand extends BaseWorkflowCommand<string> {
       chapterDir: `vela://draft/ch${this.params.chapterNumber}`,
     })
 
-    callbacks.log(`✅ 审稿修复完成（${cleanRefined.length} 字），已生成修订稿版本 r${revIndex}`)
+    callbacks.log(`✅ 审稿修复完成（${finalRefined.length} 字），已生成修订稿版本 r${revIndex}`)
     return refined
   }
 }

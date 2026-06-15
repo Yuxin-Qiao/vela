@@ -9,6 +9,14 @@ export class BasePromptBuilder {
   protected template: PromptTemplate;
   protected variables: Record<string, string> = {};
 
+  /**
+   * 注入叙事一致性 Canon 上下文，所有 Builder 子类均可使用。模板应预留 {{canon_context}} 变量。
+   */
+  withCanonContext(renderedCanon: string) {
+    this.variables.canon_context = renderedCanon;
+    return this;
+  }
+
   constructor(template: PromptTemplate) {
     this.template = template;
   }
@@ -149,6 +157,7 @@ export class ChapterPromptBuilder extends BasePromptBuilder {
     this.variables.knowledge_query_hint = hint;
     return this;
   }
+
 }
 
 /**
