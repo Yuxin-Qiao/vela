@@ -11,6 +11,11 @@
  * 每个测试都使用真实的中文玄幻题材片段以贴近实际生成场景。
  */
 import { describe, it, expect } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { initProjectDatabase, closeProjectDatabase } from '../../../../electron/database'
+import { CanonRepository } from '../../../../electron/repositories/canon-repository'
 import {
   checkLocationContinuity,
   checkKnowledgeAuthorization,
@@ -609,5 +614,93 @@ describe('CanonStore.writeback', () => {
     expect(stateUpsert.keyItems).toBe('旧剑、青虹剑')
     expect(stateUpsert.knowledge).toEqual(['师父被害'])
     expect(stateUpsert.updatedAtChapter).toBe(5)
+  })
+})
+
+// ============================================================
+// 功能级集成：CanonRepository（SQLite 持久化）
+// ============================================================
+describe('CanonRepository SQLite persistence', () => {
+  it('真实 SQLite 表能持久化 timeline/state/plot/fact/summary', () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'vela-canon-db-'))
+    try {
+      initProjectDatabase(projectDir)
+
+      const eventId = CanonRepository.appendTimelineEvent({
+        chapterNumber: 3,
+        sequence: 1,
+        characters: ['林轩'],
+        location: '烈火宗',
+        timeFlow: 'sequential',
+        summary: '林轩抵达烈火宗',
+        impact: '位置更新',
+      })
+      expect(eventId).toBeGreaterThan(0)
+      expect(CanonRepository.getTimelineUpTo(3)).toMatchObject([
+        { chapterNumber: 3, sequence: 1, characters: ['林轩'], location: '烈火宗' },
+      ])
+
+      CanonRepository.upsertCharacterState({
+        character: '林轩',
+        location: '烈火宗',
+        powerLevel: '筑基期',
+        physicalState: '正常',
+        mentalState: '警惕',
+        keyItems: '青虹剑',
+        currentGoal: '调查赵无极',
+        knowledge: ['师父被害'],
+        relationships: { 赵无极: '敌人' },
+        recentEvents: '抵达烈火宗',
+        updatedAtChapter: 3,
+        updatedAt: '2026-01-01T00:00:00Z',
+      })
+      expect(CanonRepository.getCharacterState('林轩')).toMatchObject({
+        character: '林轩',
+        location: '烈火宗',
+        knowledge: ['师父被害'],
+        relationships: { 赵无极: '敌人' },
+      })
+
+      const plotId = CanonRepository.addPlotLine({
+        name: '对抗赵无极',
+        status: 'active',
+        startedAt: 3,
+        lastAdvancedAt: 3,
+        characters: ['林轩', '赵无极'],
+        currentState: '发现线索',
+        description: '林轩开始追查幕后黑手',
+      })
+      CanonRepository.advancePlotLine(plotId, '已锁定烈火宗', 4)
+      expect(CanonRepository.getPlotLines({ status: 'active' })[0]).toMatchObject({
+        id: plotId,
+        currentState: '已锁定烈火宗',
+        lastAdvancedAt: 4,
+      })
+
+      const factId = CanonRepository.addFact({
+        category: 'item',
+        statement: '林轩获得青虹剑',
+        introducedAt: 3,
+        characters: ['林轩'],
+        evidence: '师父递给他一柄青虹剑',
+      })
+      expect(factId).toBeGreaterThan(0)
+      expect(CanonRepository.getFacts()).toMatchObject([
+        { statement: '林轩获得青虹剑', introducedAt: 3, characters: ['林轩'] },
+      ])
+
+      CanonRepository.upsertSummary({
+        chapterNumber: 3,
+        title: '烈火宗',
+        summary: '林轩抵达烈火宗并发现赵无极线索。',
+        createdAt: '2026-01-01T00:00:00Z',
+      })
+      expect(CanonRepository.getRecentSummaries(1)).toMatchObject([
+        { chapterNumber: 3, title: '烈火宗' },
+      ])
+    } finally {
+      closeProjectDatabase()
+      rmSync(projectDir, { recursive: true, force: true })
+    }
   })
 })
