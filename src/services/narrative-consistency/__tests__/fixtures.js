@@ -30,6 +30,7 @@ export function makeTimeline(events) {
     summary: (e && e.summary) || `事件${i + 1}`,
     impact: (e && e.impact) || '',
     createdAt: '2025-01-01T00:00:00Z',
+    ...e,
   }))
 }
 
@@ -64,12 +65,12 @@ export function makeCanon(over) {
     characterArch: '张三（主角）\n李四（师兄）',
     characterStates: over.characterStates || [makeState()],
     timeline: over.timeline || [],
-    recentChapterSummaries: over.recentChapterSummaries || '（无）',
+    recentChapterSummaries: over.recentChapterSummaries ?? '上一章摘要：林轩离开青云山。',
     openPlotLines: over.openPlotLines || [],
     chapterGoal: '推进剧情',
     knownFacts: over.knownFacts || [],
-    previousEnding: over.previousEnding || '',
-    ragContext: '',
+    previousEnding: over.previousEnding ?? '林轩站在青云山巅，望向远方。',
+    ragContext: over.ragContext ?? 'RAG 参考：青云山位于北境。',
     writingStyle: '热血',
     globalGuidance: '不要无解释瞬移',
     hardConstraints: '硬性约束占位',

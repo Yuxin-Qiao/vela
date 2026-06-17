@@ -81,7 +81,7 @@ function computeTensionQuality(content: string, timeline: TimelineEvent[], curre
 
   // 检测各种张力标记的出现频率
   const scores: number[] = []
-  for (const [category, markers] of Object.entries(TENSION_MARKERS)) {
+  for (const markers of Object.values(TENSION_MARKERS)) {
     const hits = markers.filter(m => content.includes(m)).length
     const density = hits / Math.max(1, content.length / 500) // 每500字
     // 每个类别理想密度 1-3

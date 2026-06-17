@@ -9,7 +9,6 @@ import {
   renderCanonContext,
   validateChapter,
   tryAutoFix,
-  issuesToWarnings,
 } from '../../narrative-consistency'
 
 

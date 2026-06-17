@@ -11,7 +11,7 @@ import type {
   ConsistencyIssue,
 } from './types'
 import { validateChapter } from './validator'
-import { tryAutoFix, issuesToWarnings } from './auto-fix'
+import { tryAutoFix } from './auto-fix'
 
 export type GateSeverity = 'LOW' | 'MEDIUM' | 'HIGH'
 

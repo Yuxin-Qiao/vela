@@ -12,8 +12,6 @@ import {
   renderCanonContext,
   validateChapter,
   tryAutoFix,
-  issuesToWarnings,
-  canonStore,
 } from '../../narrative-consistency'
 
 export class GenerateDraftCommand extends BaseWorkflowCommand {

@@ -14,8 +14,6 @@ import type {
   TimelineEvent,
   CharacterStateSnapshot,
   PlotLine,
-  Fact,
-  ChapterSummary,
 } from './types'
 import { canonStore } from './canon-store'
 

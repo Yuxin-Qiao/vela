@@ -329,7 +329,7 @@ export class FinalizeChapterCommand extends BaseWorkflowCommand<void> {
     super()
   }
 
-  async execute({ callbacks, context }: CommandExecuteParams): Promise<void> {
+  async execute({ callbacks }: CommandExecuteParams): Promise<void> {
     const project = useProjectStore.getState().currentProject
     if (!project) throw new Error('未打开项目')
 

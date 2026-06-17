@@ -24,7 +24,6 @@
 import type {
   CanonContext,
   ConsistencyIssue,
-  ConsistencyReport,
   CharacterStateSnapshot,
 } from './types'
 
@@ -124,7 +123,6 @@ export function checkKnowledgeAuthorization(
   if (characterStates.length === 0) return issues
 
   // 知道/了解到/明白/听到/听说/得知/意识到
-  const knowVerbs = ['知道', '了解', '明白', '听到', '听说', '得知', '意识到', '发现', '记得', '记得']
   const charNames = characterStates.map(s => s.character)
 
   // 按段落切分

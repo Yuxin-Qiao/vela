@@ -131,7 +131,7 @@ function computeEmotionalEngagement(content: string): number {
 // ============================================================
 
 function computeNarrativeTrust(
-  content: string,
+  _content: string,
   driftScore: number,
   fluidityScore: number,
 ): number {

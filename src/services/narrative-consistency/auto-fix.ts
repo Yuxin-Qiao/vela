@@ -156,9 +156,9 @@ export function issuesToWarnings(issues: ConsistencyIssue[]): string {
 
 /** 构造 ConsistencyReport（汇总 validate + autoFix） */
 export function buildReport(
-  originalIssues: ConsistencyIssue[],
+  _originalIssues: ConsistencyIssue[],
   autoFixResult: AutoFixResult,
-  originalContent: string,
+  _originalContent: string,
 ): ConsistencyReport {
   const allIssues = [...autoFixResult.fixedIssues.map(i => ({ ...i, severity: 'info' as const, message: `[已自动修复] ${i.message}` })), ...autoFixResult.remainingIssues]
   return {

@@ -15,7 +15,6 @@
 import type {
   CharacterStateSnapshot,
   TimelineEvent,
-  CanonContext,
   ChapterSummary,
 } from './types'
 import { canonStore } from './canon-store'
@@ -42,7 +41,7 @@ export interface StabilityScore {
 
 function computeContextDrift(
   characterStates: CharacterStateSnapshot[],
-  recentSummaries: ChapterSummary[],
+  _recentSummaries: ChapterSummary[],
 ): number {
   if (characterStates.length === 0) return 0
 
@@ -91,7 +90,7 @@ function computeIntentVariance(
 
 function computeCharacterEntropy(
   timeline: TimelineEvent[],
-  chapterSummaries: ChapterSummary[],
+  _chapterSummaries: ChapterSummary[],
   currentChapter: number,
 ): number {
   const window = 5
@@ -221,7 +220,7 @@ export async function generateCanonSnapshot(
 ): Promise<CanonSnapshot> {
   const startChapter = Math.max(1, currentChapter - window)
 
-  const [timeline, characterStates, summaries, facts, plotLines] = await Promise.all([
+  const [timeline, characterStates, _summaries, facts, plotLines] = await Promise.all([
     canonStore.getTimeline(currentChapter),
     canonStore.getAllCharacterStates(),
     canonStore.getRecentSummaries(window),
@@ -306,13 +305,12 @@ export interface StabilizeResult {
  */
 export function stabilizeOutput(
   content: string,
-  characterStates: CharacterStateSnapshot[],
+  _characterStates: CharacterStateSnapshot[],
 ): StabilizeResult {
   let working = content
   const fixes: string[] = []
 
   // 1. 角色名一致性：统一简繁/别名
-  const charNames = characterStates.map(cs => cs.character).filter(n => n.length >= 2)
   // 不做替换，只记录潜在问题
 
   // 2. 去除过度的感叹号（3+连续）→ max 2

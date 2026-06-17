@@ -18,9 +18,7 @@ import type {
   CanonWriteback,
   TimelineEvent,
   CharacterStateDelta,
-  PlotLine,
   Fact,
-  ChapterSummary,
 } from './types'
 import { canonStore } from './canon-store'
 
@@ -119,10 +117,11 @@ function extractCharacterDeltas(
     if (!char.name || char.name.length < 2) continue
     // 找到该角色最后一次有信息出现的段落
     let lastMeaningfulIdx = -1
+    const stateSignals = ['走', '跑', '坐', '站', '说', '看向', '拿起', '击杀', '出现', '离开', '死亡', '知道', '发现', '告别', '前往', '到来', '等待']
     for (let i = paragraphs.length - 1; i >= 0; i--) {
       if (!paragraphs[i].includes(char.name)) continue
       // 必须包含动作或状态描述
-      if (/[走跑坐站说话看向拿起击杀出现离开死亡]。/.test(paragraphs[i])) {
+      if (stateSignals.some(signal => paragraphs[i].includes(signal))) {
         lastMeaningfulIdx = i
         break
       }
@@ -198,6 +197,11 @@ function extractFacts(content: string, chapterNumber: number, characters: string
       facts.push({ category: 'item', statement: `${m[1]}${m[2]}${m[3]}`, introducedAt: chapterNumber, characters: [m[1]], evidence: s })
       continue
     }
+    m = s.match(/([\u4e00-\u9fa5A-Za-z0-9_]{2,8})(递给|交给|赠予|给了|拿到|拾起|获得)(?:他|她|其)?(?:一[柄把枚颗件卷])?([\u4e00-\u9fa5A-Za-z0-9_]{2,12})/)
+    if (m && characters.includes(m[1])) {
+      facts.push({ category: 'item', statement: `${m[1]}${m[2]}${m[3]}`, introducedAt: chapterNumber, characters: [m[1]], evidence: s })
+      continue
+    }
     // 关系类："X 与 Y 是 Z"
     m = s.match(/([\u4e00-\u9fa5A-Za-z0-9_]{2,8})(与|和)([\u4e00-\u9fa5A-Za-z0-9_]{2,8})(是|为|成为)([\u4e00-\u9fa5]{2,8})/)
     if (m && characters.includes(m[1]) && characters.includes(m[3])) {
@@ -241,7 +245,7 @@ export function extractCanonWriteback(params: ExtractParams): CanonWriteback {
   const { chapterNumber, chapterTitle, chapterContent, characters } = params
 
   // 清理标题（去掉 "第N章 " 前缀）
-  const cleanTitle = chapterTitle.replace(/^第\s*\d+\s*章\s*/, '').trim()
+  const cleanTitle = chapterTitle.replace(/^第\s*[\d一二三四五六七八九十百千万零〇]+\s*章\s*/, '').trim()
 
   const events = extractEvents(chapterContent, chapterNumber, characters)
   const characterDeltas = extractCharacterDeltas(chapterContent, chapterNumber, characters)
