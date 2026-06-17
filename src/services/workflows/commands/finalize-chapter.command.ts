@@ -388,6 +388,7 @@ export class FinalizeChapterCommand extends BaseWorkflowCommand<void> {
       }
     } catch (e) {
       callbacks.log('  [Gate] error: ' + String(e))
+      throw new Error(`叙事一致性 Gate 执行失败，定稿已中止：${String(e)}`)
     }
 
     await ipc.invoke('db:draft-update-content', dbDraft.id, gatedContent, gatedContent.length)

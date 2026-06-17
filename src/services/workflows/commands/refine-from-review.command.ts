@@ -7,8 +7,7 @@ import { ipc } from '../../ipc-client'
 import {
   buildCanonContext,
   renderCanonContext,
-  validateChapter,
-  tryAutoFix,
+  runConsistencyGate,
 } from '../../narrative-consistency'
 
 
@@ -83,39 +82,40 @@ export class RefineFromReviewCommand extends BaseWorkflowCommand<string> {
     const cleanRefined = this.stripThinkingTags(refined)
 
     // ==========================================
-    // [Canon] 审稿修复后一致性校验（isRewrite=true）
+    // [Canon] 审稿修复后一致性 Gate（isRewrite=true）
     // ==========================================
     let finalRefined = cleanRefined
     const canonForReviewRefine = (context.data as Record<string, unknown>).__canonForReviewRefine as import('../../narrative-consistency').CanonContext | undefined
     if (canonForReviewRefine) {
       try {
-        const issues = validateChapter({
+        const gateResult = await runConsistencyGate({
           chapterNumber: this.params.chapterNumber,
           chapterContent: cleanRefined,
           canon: canonForReviewRefine,
           isRewrite: true,
         })
-        const autoFixResult = tryAutoFix(cleanRefined, issues)
-        if (autoFixResult.modified && autoFixResult.content) {
-          finalRefined = autoFixResult.content
-          callbacks.log(`  🛡️ [Canon] 审稿修复自动修复 ${autoFixResult.fixedIssues.length} 处一致性问题`)
+        callbacks.log(`  🛡️ [Gate] 审稿修复 ${gateResult.verdict}: ${gateResult.report}`)
+        if (gateResult.verdict === 'BLOCK') {
+          throw new Error(`审稿修复结果被叙事一致性 Gate 阻止：${gateResult.blockingReasons.join('；')}`)
         }
-        const remaining = autoFixResult.remainingIssues
-        if (remaining.length > 0) {
-          callbacks.log(`  ⚠️ [Canon] 审稿修复残留 ${remaining.length} 处一致性提示（不影响保存）`)
-          context.data.consistencyWarnings = remaining
-        } else if (issues.length > 0) {
-          callbacks.log(`  ✅ [Canon] ${issues.length} 处审稿修复一致性问题已自动修复`)
-        } else {
+        if (gateResult.verdict === 'REPAIR' && gateResult.repairedContent) {
+          finalRefined = gateResult.repairedContent
+          callbacks.log(`  🛡️ [Canon] 审稿修复自动修复 ${gateResult.repairAttempts} 轮后保存修复稿`)
+        }
+        if (gateResult.issues.length === 0) {
           callbacks.log(`  ✅ [Canon] 审稿修复一致性检查通过`)
         }
+        const remaining = gateResult.issues.map(i => i.issue)
+        if (remaining.length > 0) context.data.consistencyWarnings = remaining
         context.data.consistencyReport = {
-          totalIssues: issues.length,
-          autoFixed: autoFixResult.fixedIssues.length,
-          remaining: remaining.length,
+          verdict: gateResult.verdict,
+          totalIssues: gateResult.issues.length,
+          repairAttempts: gateResult.repairAttempts,
+          remaining: gateResult.issues.length,
         }
       } catch (e) {
-        callbacks.log(`  ⚠️ [Canon] 审稿修复校验异常：${String(e)}`)
+        callbacks.log(`  ❌ [Canon] 审稿修复 Gate 异常：${String(e)}`)
+        throw e
       }
     }
 
