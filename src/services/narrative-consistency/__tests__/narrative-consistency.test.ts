@@ -21,8 +21,10 @@ import {
   checkItemOwnership,
   validateChapter,
   tryAutoFix,
+  runConsistencyGate,
   renderCanonContext,
   extractCanonWriteback,
+  CanonStore,
   type CanonContext,
 } from '../index'
 import {
@@ -456,5 +458,156 @@ describe('上一章结尾衔接', () => {
     const info = issues.find(i => i.category === 'continuity')
     expect(info).toBeDefined()
     expect(info?.message).toContain('林轩')
+  })
+})
+
+// ============================================================
+// 功能级集成：Soft gate 三态
+// ============================================================
+describe('Soft gate：PASS / REPAIR / BLOCK', () => {
+  it('无一致性问题时返回 PASS', async () => {
+    const canon = makeCanon({
+      characterStates: [makeState({ character: '林轩', location: '青云山', knowledge: ['师父被害'] })],
+      previousEnding: '',
+      ragContext: '',
+    })
+    const result = await runConsistencyGate({
+      chapterNumber: 1,
+      chapterContent: '林轩在青云山练剑，心中记着师父被害之事。',
+      canon,
+    })
+    expect(result.verdict).toBe('PASS')
+    expect(result.repairedContent).toBeUndefined()
+  })
+
+  it('可自动补充信息来源的问题返回 REPAIR 并提供修复正文', async () => {
+    const canon = makeCanon({
+      characterStates: [makeState({ character: '林轩', knowledge: [] })],
+      previousEnding: '',
+      ragContext: '',
+    })
+    const result = await runConsistencyGate({
+      chapterNumber: 1,
+      chapterContent: '林轩知道了九转还魂丹的位置，立刻动身。',
+      canon,
+    })
+    expect(result.verdict).toBe('REPAIR')
+    expect(result.repairedContent).toContain('（据前文线索）林轩知道了九转还魂丹的位置')
+    expect(result.blockingReasons).toHaveLength(0)
+  })
+
+  it('rewrite 破坏已死亡角色事实时返回 BLOCK', async () => {
+    const canon = makeCanon({
+      timeline: makeTimeline([{
+        chapterNumber: 1,
+        sequence: 1,
+        summary: '师父在烈火宗之战中死亡',
+        impact: '师父死亡',
+        characters: ['师父'],
+      }]),
+      previousEnding: '',
+      ragContext: '',
+    })
+    const result = await runConsistencyGate({
+      chapterNumber: 2,
+      chapterContent: '师父笑着走进大殿，说孩子们我回来了。',
+      canon,
+      isRewrite: true,
+    })
+    expect(result.verdict).toBe('BLOCK')
+    expect(result.blockingReasons.join('\n')).toContain('已死亡人物')
+  })
+})
+
+// ============================================================
+// 功能级集成：CanonStore writeback（IPC → 持久化门面）
+// ============================================================
+describe('CanonStore.writeback', () => {
+  it('按章节写回摘要、时间线、角色状态、剧情线和事实', async () => {
+    const calls: Array<{ channel: string; args: unknown[] }> = []
+    const fakeIpc = {
+      async invoke(channel: string, ...args: unknown[]) {
+        calls.push({ channel, args })
+        if (channel === 'db:canon-character-state-get') {
+          return {
+            character: args[0] as string,
+            location: '青云山',
+            powerLevel: '筑基期',
+            physicalState: '正常',
+            mentalState: '',
+            keyItems: '旧剑',
+            currentGoal: '',
+            knowledge: ['师父被害'],
+            relationships: {},
+            recentEvents: '',
+            updatedAtChapter: 1,
+            updatedAt: '2025-01-01T00:00:00Z',
+          }
+        }
+        if (channel.endsWith('-append') || channel.endsWith('-add')) return { success: true, id: calls.length }
+        if (channel.endsWith('-upsert')) return { success: true }
+        return { success: true }
+      },
+    }
+
+    const store = new CanonStore(fakeIpc)
+    const result = await store.writeback({
+      chapterNumber: 5,
+      chapterTitle: '告别',
+      chapterSummary: '林轩告别师父，前往烈火宗。',
+      newEvents: [{
+        chapterNumber: 5,
+        sequence: 1,
+        characters: ['林轩'],
+        location: '烈火宗',
+        timeFlow: 'sequential',
+        summary: '林轩抵达烈火宗',
+        impact: '位置变化',
+      }],
+      characterDeltas: [{
+        character: '林轩',
+        chapterNumber: 5,
+        after: {
+          location: '烈火宗',
+          keyItems: '旧剑、青虹剑',
+          recentEvents: '抵达烈火宗',
+        },
+      }],
+      plotLineChanges: {
+        added: [{
+          name: '对抗赵无极',
+          status: 'active',
+          startedAt: 5,
+          lastAdvancedAt: 5,
+          characters: ['林轩'],
+          currentState: '本章开启',
+          description: '开启对抗赵无极的旅程',
+        }],
+      },
+      newFacts: [{
+        category: 'item',
+        statement: '林轩获得青虹剑',
+        introducedAt: 5,
+        characters: ['林轩'],
+        evidence: '师父递给他一柄青虹剑',
+      }],
+    })
+
+    expect(result.ok).toBe(true)
+    expect(calls.map(c => c.channel)).toEqual([
+      'db:canon-summary-upsert',
+      'db:canon-timeline-clear-chapter',
+      'db:canon-fact-clear-chapter',
+      'db:canon-timeline-append',
+      'db:canon-character-state-get',
+      'db:canon-character-state-upsert',
+      'db:canon-plot-add',
+      'db:canon-fact-add',
+    ])
+    const stateUpsert = calls.find(c => c.channel === 'db:canon-character-state-upsert')?.args[0] as { location: string; keyItems: string; knowledge: string[]; updatedAtChapter: number }
+    expect(stateUpsert.location).toBe('烈火宗')
+    expect(stateUpsert.keyItems).toBe('旧剑、青虹剑')
+    expect(stateUpsert.knowledge).toEqual(['师父被害'])
+    expect(stateUpsert.updatedAtChapter).toBe(5)
   })
 })

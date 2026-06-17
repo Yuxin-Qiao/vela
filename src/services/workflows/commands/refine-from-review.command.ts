@@ -135,8 +135,8 @@ export class RefineFromReviewCommand extends BaseWorkflowCommand<string> {
       baseDraftId: baseDraft.id,
       revisionIndex: revIndex,
       revisionType: 'review-fix',
-      content: cleanRefined,
-      wordCount: cleanRefined.length,
+      content: finalRefined,
+      wordCount: finalRefined.length,
       userPrompt: this.params.userRefinePrompt,
     }) as { success: boolean; id: number }
 
@@ -147,13 +147,13 @@ export class RefineFromReviewCommand extends BaseWorkflowCommand<string> {
       type: 'diff',
       filePath: this.params.draftPath,
       originalContent: this.params.draftContent,
-      content: cleanRefined,
+      content: finalRefined,
       revisionPath: String(createRes.id),
       chapterNumber: this.params.chapterNumber,
       chapterDir: `vela://draft/ch${this.params.chapterNumber}`,
     })
 
     callbacks.log(`✅ 审稿修复完成（${finalRefined.length} 字），已生成修订稿版本 r${revIndex}`)
-    return refined
+    return finalRefined
   }
 }

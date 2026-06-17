@@ -20,14 +20,20 @@ import type {
   CanonWriteback,
 } from './types'
 
+interface CanonIpcClient {
+  invoke: (channel: string, ...args: unknown[]) => Promise<unknown>
+}
+
 export class CanonStore {
+  constructor(private readonly ipcClient: CanonIpcClient = ipc as unknown as CanonIpcClient) {}
+
   // ============================================================
   // Timeline
   // ============================================================
 
   async getTimeline(maxChapter: number, includeFlashback = true): Promise<TimelineEvent[]> {
     try {
-      return (await ipc.invoke('db:canon-timeline-get', maxChapter, includeFlashback)) || []
+      return (await this.ipcClient.invoke('db:canon-timeline-get', maxChapter, includeFlashback) as TimelineEvent[]) || []
     } catch (err) {
       console.warn('[CanonStore] getTimeline 失败:', err)
       return []
@@ -36,7 +42,7 @@ export class CanonStore {
 
   async getChapterTimeline(chapterNumber: number): Promise<TimelineEvent[]> {
     try {
-      return (await ipc.invoke('db:canon-timeline-get-chapter', chapterNumber)) || []
+      return (await this.ipcClient.invoke('db:canon-timeline-get-chapter', chapterNumber) as TimelineEvent[]) || []
     } catch (err) {
       console.warn('[CanonStore] getChapterTimeline 失败:', err)
       return []
@@ -45,7 +51,7 @@ export class CanonStore {
 
   async appendTimelineEvent(event: Omit<TimelineEvent, 'id' | 'createdAt'>): Promise<number | null> {
     try {
-      const r = await ipc.invoke('db:canon-timeline-append', event)
+      const r = await this.ipcClient.invoke('db:canon-timeline-append', event) as { success?: boolean; id?: number } | undefined
       return r?.success ? r.id ?? null : null
     } catch (err) {
       console.warn('[CanonStore] appendTimelineEvent 失败:', err)
@@ -54,7 +60,7 @@ export class CanonStore {
   }
 
   async clearChapterTimeline(chapterNumber: number): Promise<void> {
-    try { await ipc.invoke('db:canon-timeline-clear-chapter', chapterNumber) } catch { /* 忽略 */ }
+    try { await this.ipcClient.invoke('db:canon-timeline-clear-chapter', chapterNumber) } catch { /* 忽略 */ }
   }
 
   // ============================================================
@@ -63,7 +69,7 @@ export class CanonStore {
 
   async getAllCharacterStates(): Promise<CharacterStateSnapshot[]> {
     try {
-      return (await ipc.invoke('db:canon-character-state-get-all')) || []
+      return (await this.ipcClient.invoke('db:canon-character-state-get-all') as CharacterStateSnapshot[]) || []
     } catch (err) {
       console.warn('[CanonStore] getAllCharacterStates 失败:', err)
       return []
@@ -72,7 +78,7 @@ export class CanonStore {
 
   async getCharacterState(character: string): Promise<CharacterStateSnapshot | null> {
     try {
-      return await ipc.invoke('db:canon-character-state-get', character)
+      return await this.ipcClient.invoke('db:canon-character-state-get', character) as CharacterStateSnapshot | null
     } catch (err) {
       console.warn('[CanonStore] getCharacterState 失败:', err)
       return null
@@ -81,7 +87,7 @@ export class CanonStore {
 
   async upsertCharacterState(snapshot: CharacterStateSnapshot): Promise<boolean> {
     try {
-      const r = await ipc.invoke('db:canon-character-state-upsert', snapshot)
+      const r = await this.ipcClient.invoke('db:canon-character-state-upsert', snapshot) as { success?: boolean } | undefined
       return r?.success === true
     } catch (err) {
       console.warn('[CanonStore] upsertCharacterState 失败:', err)
@@ -95,7 +101,7 @@ export class CanonStore {
 
   async getPlotLines(status?: PlotLine['status']): Promise<PlotLine[]> {
     try {
-      return (await ipc.invoke('db:canon-plot-list', status)) || []
+      return (await this.ipcClient.invoke('db:canon-plot-list', status) as PlotLine[]) || []
     } catch (err) {
       console.warn('[CanonStore] getPlotLines 失败:', err)
       return []
@@ -108,7 +114,7 @@ export class CanonStore {
 
   async addPlotLine(line: Omit<PlotLine, 'id'>): Promise<number | null> {
     try {
-      const r = await ipc.invoke('db:canon-plot-add', line)
+      const r = await this.ipcClient.invoke('db:canon-plot-add', line) as { success?: boolean; id?: number } | undefined
       return r?.success ? r.id ?? null : null
     } catch (err) {
       console.warn('[CanonStore] addPlotLine 失败:', err)
@@ -117,11 +123,11 @@ export class CanonStore {
   }
 
   async advancePlotLine(id: number, currentState: string, lastAdvancedAt: number): Promise<void> {
-    try { await ipc.invoke('db:canon-plot-advance', id, currentState, lastAdvancedAt) } catch { /* 忽略 */ }
+    try { await this.ipcClient.invoke('db:canon-plot-advance', id, currentState, lastAdvancedAt) } catch { /* 忽略 */ }
   }
 
   async resolvePlotLine(id: number, chapterNumber: number): Promise<void> {
-    try { await ipc.invoke('db:canon-plot-resolve', id, chapterNumber) } catch { /* 忽略 */ }
+    try { await this.ipcClient.invoke('db:canon-plot-resolve', id, chapterNumber) } catch { /* 忽略 */ }
   }
 
   // ============================================================
@@ -130,7 +136,7 @@ export class CanonStore {
 
   async getFacts(): Promise<Fact[]> {
     try {
-      return (await ipc.invoke('db:canon-fact-list')) || []
+      return (await this.ipcClient.invoke('db:canon-fact-list') as Fact[]) || []
     } catch (err) {
       console.warn('[CanonStore] getFacts 失败:', err)
       return []
@@ -139,7 +145,7 @@ export class CanonStore {
 
   async addFact(fact: Omit<Fact, 'id'>): Promise<number | null> {
     try {
-      const r = await ipc.invoke('db:canon-fact-add', fact)
+      const r = await this.ipcClient.invoke('db:canon-fact-add', fact) as { success?: boolean; id?: number } | undefined
       return r?.success ? r.id ?? null : null
     } catch (err) {
       console.warn('[CanonStore] addFact 失败:', err)
@@ -148,7 +154,7 @@ export class CanonStore {
   }
 
   async clearChapterFacts(chapterNumber: number): Promise<void> {
-    try { await ipc.invoke('db:canon-fact-clear-chapter', chapterNumber) } catch { /* 忽略 */ }
+    try { await this.ipcClient.invoke('db:canon-fact-clear-chapter', chapterNumber) } catch { /* 忽略 */ }
   }
 
   // ============================================================
@@ -157,7 +163,7 @@ export class CanonStore {
 
   async getRecentSummaries(limit = 5): Promise<ChapterSummary[]> {
     try {
-      return (await ipc.invoke('db:canon-summary-list-recent', limit)) || []
+      return (await this.ipcClient.invoke('db:canon-summary-list-recent', limit) as ChapterSummary[]) || []
     } catch (err) {
       console.warn('[CanonStore] getRecentSummaries 失败:', err)
       return []
@@ -166,7 +172,7 @@ export class CanonStore {
 
   async getSummary(chapterNumber: number): Promise<ChapterSummary | null> {
     try {
-      return await ipc.invoke('db:canon-summary-get', chapterNumber)
+      return await this.ipcClient.invoke('db:canon-summary-get', chapterNumber) as ChapterSummary | null
     } catch (err) {
       console.warn('[CanonStore] getSummary 失败:', err)
       return null
@@ -174,7 +180,7 @@ export class CanonStore {
   }
 
   async upsertSummary(summary: ChapterSummary): Promise<void> {
-    try { await ipc.invoke('db:canon-summary-upsert', summary) } catch { /* 忽略 */ }
+    try { await this.ipcClient.invoke('db:canon-summary-upsert', summary) } catch { /* 忽略 */ }
   }
 
   // ============================================================

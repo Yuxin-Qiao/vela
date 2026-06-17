@@ -151,6 +151,8 @@ export function checkKnowledgeAuthorization(
           )
           // 模糊判断：动词为"记得/记忆"通常是合法回忆
           if (verb === '记得' || verb === '记忆') continue
+          const sourceWindow = p.slice(Math.max(0, m.index - 20), m.index + m[0].length + 20)
+          if (/据前文线索|据.*透露|从.*得知|听.*说|目睹|亲眼|书信|传讯|线索/.test(sourceWindow)) continue
           if (!inKnowledge) {
             issues.push({
               severity: 'warning',

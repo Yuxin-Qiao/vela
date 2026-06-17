@@ -338,37 +338,20 @@ export class FinalizeChapterCommand extends BaseWorkflowCommand<void> {
 
     callbacks.log('\n===== 开始定稿与后处理分析 =====')
 
-    // 1. 获取对应草稿并将库内状态变更为 finalized（同时同步定稿期可能微调过的正文）
+    // 1. 获取对应草稿。一致性 Gate 必须先通过，才能写入 finalized/物理文件。
     const { parseDraftMeta } = await import('../chapter-workflow')
     const dbDraft = await parseDraftMeta(this.params.draftPath)
     if (!dbDraft) throw new Error('内部状态流转异常：无法在数据库中定位该草稿源文件或解析路径版本')
 
-    await ipc.invoke('db:draft-update-content', dbDraft.id, refinedDraftText, refinedDraftText.length)
-    await ipc.invoke('db:draft-update-status', dbDraft.id, 'finalized', refinedDraftText.length)
-
-    // 【重要】：除了写入 DB，对于已定稿的章节需要实体化为物理文件放在根目录，供外部系统读取或备份
-    const safeTitle = this.params.chapterInfo.title ? ` ${this.params.chapterInfo.title.replace(/[/\\]/g, '_')}` : ''
-    const physicalPath = `${project.path}/第${this.params.chapterNumber}章${safeTitle}.txt`
-    try {
-      const titleLine = this.params.chapterInfo.title ? `第${this.params.chapterNumber}章 ${this.params.chapterInfo.title}\n\n` : `第${this.params.chapterNumber}章\n\n`
-      const contentToWrite = titleLine + refinedDraftText.replace(/^#+ .*\n*/, '')
-      await ipc.invoke('fs:write-file', physicalPath, contentToWrite)
-    } catch (e) {
-      callbacks.log(`⚠️ 写入根目录物理文件失败: ${String(e)}`)
-    }
-
-    callbacks.log(`✅ 定稿内容已正式写入 SQLite 数据库并同步为根目录文件 (第${this.params.chapterNumber}章${safeTitle}.txt)`)
-
     // ==========================================
-    // [Gate v2] 叙事一致性强制门禁 — 必须在后处理之前通过
+    // [Gate v2] 叙事一致性强制门禁 — 必须在任何定稿写入之前通过
     // ==========================================
-        let gatedContent = refinedDraftText;
-    // Gate check
+    let gatedContent = refinedDraftText
     try {
       const [core, allCharacters] = await Promise.all([
         ipc.invoke('db:project-core-get').catch(() => null),
         ipc.invoke('db:character-get-all').catch(() => []),
-      ]);
+      ])
       const canon = await buildCanonContext({
         chapterNumber: this.params.chapterNumber,
         architecture: {
@@ -387,26 +370,41 @@ export class FinalizeChapterCommand extends BaseWorkflowCommand<void> {
         ragContext: '',
         writingStyle: project.novelConfig.writingStyle || '',
         globalGuidance: project.novelConfig.globalGuidance || '',
-      });
+      })
       const gateResult = await runConsistencyGate({
         chapterNumber: this.params.chapterNumber,
         chapterContent: gatedContent,
         canon,
         isRewrite: false,
-      });
-      callbacks.log('  [Gate] ' + gateResult.verdict + ': ' + gateResult.report);
+      })
+      callbacks.log('  [Gate] ' + gateResult.verdict + ': ' + gateResult.report)
       if (gateResult.verdict === 'BLOCK') {
-        callbacks.log('  [Gate] BLOCKED - HIGH conflicts. Please refine and retry.');
-        return;
+        callbacks.log('  [Gate] BLOCKED - HIGH conflicts. Please refine and retry.')
+        return
       }
       if (gateResult.verdict === 'REPAIR' && gateResult.repairedContent) {
-        gatedContent = gateResult.repairedContent;
-        callbacks.log('  [Gate] REPAIRED (' + gateResult.repairAttempts + ' attempts)');
-        await ipc.invoke('db:draft-update-content', dbDraft.id, gatedContent, gatedContent.length);
+        gatedContent = gateResult.repairedContent
+        callbacks.log('  [Gate] REPAIRED (' + gateResult.repairAttempts + ' attempts)')
       }
     } catch (e) {
-      callbacks.log('  [Gate] error: ' + String(e));
+      callbacks.log('  [Gate] error: ' + String(e))
     }
+
+    await ipc.invoke('db:draft-update-content', dbDraft.id, gatedContent, gatedContent.length)
+    await ipc.invoke('db:draft-update-status', dbDraft.id, 'finalized', gatedContent.length)
+
+    // 【重要】：除了写入 DB，对于已定稿的章节需要实体化为物理文件放在根目录，供外部系统读取或备份
+    const safeTitle = this.params.chapterInfo.title ? ` ${this.params.chapterInfo.title.replace(/[/\\]/g, '_')}` : ''
+    const physicalPath = `${project.path}/第${this.params.chapterNumber}章${safeTitle}.txt`
+    try {
+      const titleLine = this.params.chapterInfo.title ? `第${this.params.chapterNumber}章 ${this.params.chapterInfo.title}\n\n` : `第${this.params.chapterNumber}章\n\n`
+      const contentToWrite = titleLine + gatedContent.replace(/^#+ .*\n*/, '')
+      await ipc.invoke('fs:write-file', physicalPath, contentToWrite)
+    } catch (e) {
+      callbacks.log(`⚠️ 写入根目录物理文件失败: ${String(e)}`)
+    }
+
+    callbacks.log(`✅ 定稿内容已正式写入 SQLite 数据库并同步为根目录文件 (第${this.params.chapterNumber}章${safeTitle}.txt)`)
 
     // 3. 通过 PostProcessPipeline 执行后处理（状态持久化 + 支持重试）
     callbacks.log('🚀 正在启动后台大模型推演系统更新全书状态...')
