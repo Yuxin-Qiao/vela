@@ -8,9 +8,7 @@ import type { ChapterInfo } from '../chapter-workflow'
 import {
   buildCanonContext,
   renderCanonContext,
-  validateChapter,
-  tryAutoFix,
-  issuesToWarnings,
+  runConsistencyGate,
 } from '../../narrative-consistency'
 
 export interface RefineDraftParams {
@@ -93,41 +91,40 @@ export class RefineDraftCommand extends BaseWorkflowCommand<string> {
     const cleanRefined = this.stripThinkingTags(refined)
 
     // ==========================================
-    // [Canon] 精修后一致性校验（isRewrite=true：禁止破坏既有事实）
+    // [Canon] 精修后一致性 Gate（isRewrite=true：禁止破坏既有事实）
     // ==========================================
     let finalRefined = cleanRefined
     const canonForRefine = (context.data as Record<string, unknown>).__canonForRefine as import('../../narrative-consistency').CanonContext | undefined
     if (canonForRefine) {
       try {
-        const issues = validateChapter({
+        const gateResult = await runConsistencyGate({
           chapterNumber: this.params.chapterNumber,
           chapterContent: cleanRefined,
           canon: canonForRefine,
           isRewrite: true,
         })
-        const autoFixResult = tryAutoFix(cleanRefined, issues)
-        if (autoFixResult.modified && autoFixResult.content) {
-          finalRefined = autoFixResult.content
-          callbacks.log(`  🛡️ [Canon] 精修自动修复 ${autoFixResult.fixedIssues.length} 处一致性问题`)
+        callbacks.log(`  🛡️ [Gate] 精修 ${gateResult.verdict}: ${gateResult.report}`)
+        if (gateResult.verdict === 'BLOCK') {
+          throw new Error(`精修结果被叙事一致性 Gate 阻止：${gateResult.blockingReasons.join('；')}`)
         }
-        const remaining = autoFixResult.remainingIssues
-        if (remaining.length > 0) {
-          const warnings = issuesToWarnings(remaining)
-          callbacks.log(`  ⚠️ [Canon] 精修残留 ${remaining.length} 处一致性提示（不影响保存）:
-${warnings.split('\n').map(l => '    ' + l).join('\n')}`)
-          context.data.consistencyWarnings = remaining
-        } else if (issues.length > 0) {
-          callbacks.log(`  ✅ [Canon] ${issues.length} 处精修一致性问题已自动修复`)
-        } else {
+        if (gateResult.verdict === 'REPAIR' && gateResult.repairedContent) {
+          finalRefined = gateResult.repairedContent
+          callbacks.log(`  🛡️ [Canon] 精修自动修复 ${gateResult.repairAttempts} 轮后保存修复稿`)
+        }
+        if (gateResult.issues.length === 0) {
           callbacks.log(`  ✅ [Canon] 精修一致性检查通过`)
         }
+        const remaining = gateResult.issues.map(i => i.issue)
+        if (remaining.length > 0) context.data.consistencyWarnings = remaining
         context.data.consistencyReport = {
-          totalIssues: issues.length,
-          autoFixed: autoFixResult.fixedIssues.length,
-          remaining: remaining.length,
+          verdict: gateResult.verdict,
+          totalIssues: gateResult.issues.length,
+          repairAttempts: gateResult.repairAttempts,
+          remaining: gateResult.issues.length,
         }
       } catch (e) {
-        callbacks.log(`  ⚠️ [Canon] 精修校验异常：${String(e)}`)
+        callbacks.log(`  ❌ [Canon] 精修 Gate 异常：${String(e)}`)
+        throw e
       }
     }
 
@@ -147,8 +144,8 @@ ${warnings.split('\n').map(l => '    ' + l).join('\n')}`)
       baseDraftId: baseDraft.id,
       revisionIndex: revIndex,
       revisionType: 'refine',
-      content: cleanRefined,
-      wordCount: cleanRefined.length,
+      content: finalRefined,
+      wordCount: finalRefined.length,
     }) as { success: boolean; id: number }
 
     const { useEditorStore } = await import('../../../stores/editor-store')
@@ -158,7 +155,7 @@ ${warnings.split('\n').map(l => '    ' + l).join('\n')}`)
       type: 'diff',
       filePath: this.params.draftPath,
       originalContent: this.params.draftContent,
-      content: cleanRefined,
+      content: finalRefined,
       revisionPath: String(createRes.id),
       chapterNumber: this.params.chapterNumber,
       chapterDir: `vela://draft/ch${this.params.chapterNumber}`,
@@ -167,6 +164,6 @@ ${warnings.split('\n').map(l => '    ' + l).join('\n')}`)
     context.data.refined = finalRefined
     context.data.refinedPath = this.params.draftPath
     callbacks.log(`✅ 修稿完成（${finalRefined.length} 字），已生成修订稿版本 r${revIndex}`)
-    return refined
+    return finalRefined
   }
 }
