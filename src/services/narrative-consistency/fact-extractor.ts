@@ -113,15 +113,16 @@ function extractCharacterDeltas(
   const deltas: CharacterStateDelta[] = []
   const paragraphs = content.split(/\n+/).map(p => p.trim()).filter(Boolean)
 
+  // 收集所有角色名（用于 containsWholeWord 智能边界检查）
+  const allCharNames = new Set(characters.map(c => c.name).filter(n => n && n.length >= 2))
+
   for (const char of characters) {
     if (!char.name || char.name.length < 2) continue
     // 找到该角色最后一次有信息出现的段落
     let lastMeaningfulIdx = -1
-    const stateSignals = ['走', '跑', '坐', '站', '说', '看向', '拿起', '击杀', '出现', '离开', '死亡', '知道', '发现', '告别', '前往', '到来', '等待']
     for (let i = paragraphs.length - 1; i >= 0; i--) {
-      if (!paragraphs[i].includes(char.name)) continue
-      // 必须包含动作或状态描述
-      if (stateSignals.some(signal => paragraphs[i].includes(signal))) {
+      if (!containsWholeWord(paragraphs[i], char.name, allCharNames)) continue
+      if (hasStateSignal(paragraphs[i])) {
         lastMeaningfulIdx = i
         break
       }
@@ -132,7 +133,7 @@ function extractCharacterDeltas(
     const before = char.currentState || {}
 
     // 提取新位置
-    const locMatch = lastPara.match(new RegExp(`${escapeRegex(char.name)}[^。]{0,20}?(在|来到|抵达|前往|进入|返回|走出|抵达)([\u4e00-\u9fa5A-Za-z0-9_]{2,10})`))
+    const locMatch = lastPara.match(new RegExp(`(?<![\u4e00-\u9fa5])${escapeRegex(char.name)}(?![\u4e00-\u9fa5])[^。]{0,20}?(在|来到|抵达|前往|进入|返回|走出)([\u4e00-\u9fa5A-Za-z0-9_]{2,8})(?![\u4e00-\u9fa5])`))
     const newLocation = locMatch?.[2] || before.location || ''
 
     // 提取新的身体状态（受伤/死亡等）
@@ -168,6 +169,92 @@ function extractCharacterDeltas(
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * 检查 text 中是否包含完整词语 word（不被其他汉字包围）。
+ * 修复："林轩" 命中 "林轩雨" 段落的问题。
+ *
+ * 策略：只在 word 后面跟着**已知其他角色名**的前缀时，才要求边界。
+ * 例如：若 character list 里有 "林轩" 和 "林轩雨"，则 "林轩雨" 段落里 "林轩" 必须用字边界匹配。
+ * 但 "林轩知道" 中 "知" 不是角色名 → 直接用 substring 匹配即可（保留原行为）。
+ */
+function containsWholeWord(text: string, word: string, allCharNames?: Set<string>): boolean {
+  if (!word) return false
+  // 基础 substring 匹配（保留原行为，应对常见 case "林轩知道" 等）
+  if (!text.includes(word)) return false
+  // 如果有其他角色名以 word 为前缀 → 必须用字边界
+  if (allCharNames && allCharNames.size > 0) {
+    for (const name of allCharNames) {
+      if (name !== word && name.startsWith(word) && name.length > word.length) {
+        // 需要字边界：检查每个 occurrence
+        const isWordChar = (c: string) => /[一-鿿A-Za-z0-9_]/.test(c)
+        let found = false
+        let idx = text.indexOf(word)
+        while (idx >= 0) {
+          const after = idx + word.length < text.length ? text[idx + word.length] : ''
+          if (!isWordChar(after)) { found = true; break }
+          idx = text.indexOf(word, idx + 1)
+        }
+        return found
+      }
+    }
+  }
+  return true
+}
+
+/**
+ * 状态信号白名单（Set 查找，O(1)）。覆盖常见动作/状态描述。
+ * 修复：原 stateSignals 列表仅 17 个，缺 飞/遁/跳/望/听/思/答/喊 等大量常用动词。
+ */
+const STATE_SIGNALS_SET: Set<string> = new Set([
+  // 移动/位置
+  '走', '跑', '飞', '遁', '跳', '跃', '踏', '游', '爬', '降', '升',
+  '站', '坐', '蹲', '卧', '躺', '跪',
+  '出', '入', '进', '退', '逃', '追', '赶', '来', '去', '回', '返',
+  '离', '到', '达', '寻', '找', '探', '巡', '来', '去',
+  '前', '后', '左', '右', '旁', '侧',
+  // 动作
+  '看', '观', '望', '眺', '视', '盯', '扫', '窥',
+  '说', '答', '喊', '叫', '吼', '喝', '唤', '诉', '叹', '吟', '唱',
+  '听', '闻', '嗅',
+  '想', '思', '念', '忆', '梦', '念',
+  '拿', '取', '拾', '握', '持', '抓', '按', '拔', '举',
+  '打', '击', '斩', '砍', '刺', '搏', '斗', '搏', '劈',
+  '杀', '封', '锁', '破',
+  '穿', '脱', '戴', '佩',
+  '笑', '哭', '怒', '恨', '悲', '喜', '惊', '恐', '哀',
+  '叹', '息', '惊', '恐',
+  // 状态变化
+  '生', '死', '伤', '病', '醒', '睡', '醉', '昏', '倒',
+  '现', '消',
+  '遇', '逢', '撞', '碰', '见',
+  '告', '别', '逢', '见',
+  '传', '授', '教', '学', '习', '修', '炼',
+  '战', '争', '搏', '伐', '征',
+  // 关键短语（双字）—— 避免被 in 操作误判；用 2 字迭代匹配
+  '发现', '知道', '明白', '意识到', '了解', '得知', '听说', '想起', '记起',
+  '决定', '打算', '计划', '准备', '想要', '希望',
+  '抵达', '来到', '前往', '赶到', '回到', '进入', '返回', '走出',
+  '出现', '消失', '离开', '到来', '等待',
+  '告别', '分别', '重逢', '相遇', '冲突', '战斗',
+  '击败', '战胜', '打败', '击退',
+  '翻看', '拿起', '放下', '交出', '送给', '握住', '拔出', '佩戴', '装备',
+  '走向', '走向', '跑去', '飞向', '逃向', '冲向', '奔向', '走向',
+  '受伤', '死亡', '昏迷', '清醒', '倒下', '起身',
+])
+
+function hasStateSignal(text: string): boolean {
+  if (!text) return false
+  // 单字 + 双字短语扫描
+  for (let i = 0; i < text.length; i++) {
+    if (STATE_SIGNALS_SET.has(text[i])) return true
+  }
+  // 双字短语
+  for (let i = 0; i < text.length - 1; i++) {
+    if (STATE_SIGNALS_SET.has(text.substr(i, 2))) return true
+  }
+  return false
 }
 
 /**

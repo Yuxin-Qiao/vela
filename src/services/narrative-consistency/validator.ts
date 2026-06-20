@@ -146,9 +146,11 @@ export function checkKnowledgeAuthorization(
           // 检查该信息是否已在该角色的 knowledge 中（子串匹配）
           const charState = characterStates.find(s => s.character === charName)
           if (!charState) continue
-          const inKnowledge = (charState.knowledge || []).some(k =>
-            k.includes(info) || info.includes(k),
-          )
+          // 修复：使用 word-level match 替代双向子串匹配。
+          // 旧实现 `k.includes(info) || info.includes(k)` 误判严重：
+          //   knowledge = ['玉佩']，info = "那块玉佩的来历" → info.includes('玉佩') = true → 跳过
+          // 新实现：要求规范化后等值，或长串包含≥2 字的短串
+          const inKnowledge = (charState.knowledge || []).some(k => knowledgeMatch(k, info))
           // 模糊判断：动词为"记得/记忆"通常是合法回忆
           if (verb === '记得' || verb === '记忆') continue
           const sourceWindow = p.slice(Math.max(0, m.index - 20), m.index + m[0].length + 20)
@@ -172,6 +174,116 @@ export function checkKnowledgeAuthorization(
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * 修复：用规范化分词 + 长度阈值，替代 `a.includes(b) || b.includes(a)` 的双向子串匹配。
+ * 旧实现会被"knowledge=['玉佩'] + info='那块玉佩的来历'"绕过。
+ *
+ * 匹配规则（保守，按优先级）：
+ *   1) 规范化后完全等值
+ *   2) 短串长度 ≥ 2，且被长串完整包含
+ *   3) 否则不匹配
+ */
+function knowledgeMatch(canonItem: string, info: string): boolean {
+  if (!canonItem || !info) return false
+  const norm = (s: string) => (s || '').replace(/\s+/g, '').normalize('NFKC')
+  const a = norm(canonItem)
+  const b = norm(info)
+  if (!a || !b) return false
+  if (a === b) return true
+  const minLen = Math.min(a.length, b.length)
+  if (minLen < 2) return false
+  const longer = a.length > b.length ? a : b
+  const shorter = a.length > b.length ? b : a
+  if (longer.includes(shorter)) return true
+  return false
+}
+
+// ============================================================
+// 死亡信号（idiom-aware）—— 修复 deathSignals 把单字 '死' 当死亡信号
+// ============================================================
+
+/** 实际构成"角色已死"语义的多字短语 */
+const DEATH_PHRASES = [
+  '死亡', '牺牲了', '牺牲的', '身亡', '阵亡', '殒命',
+  '逝世', '去世', '与世长辞', '撒手人寰',
+  '当场毙命', '命丧当场', '已经死了', '真的死了', '彻底死了',
+  '停止了呼吸', '气绝身亡', '断气了', '咽了气',
+]
+
+/** 包含"死"字但不是实际死亡的习语/否定/隐喻 */
+const DEATH_FALSE_POSITIVES = new Set([
+  '死灰复燃', '死而复生', '死而后已', '视死如归',
+  '死马当活马医', '出生入死', '死气沉沉', '死皮赖脸',
+  '该死', '致死', '死亡率', '死路一条',
+  '死无葬身之地', '死生契阔', '死而不僵',
+  '耍死', '打死', '骂死', '笑死', '气死', '累死', '忙死', '急死', '愁死',
+  '置之死地', '死于非命', '生死', '死活',
+])
+
+function isActualDeathMention(text: string): boolean {
+  if (!text) return false
+  // 必须包含一个 DEATH_PHRASES 短语
+  const hasPhrase = DEATH_PHRASES.some(p => text.includes(p))
+  if (!hasPhrase) return false
+  // 排除被 DEATH_FALSE_POSITIVES 包含的情况
+  for (const fp of DEATH_FALSE_POSITIVES) {
+    if (text.includes(fp)) {
+      // 但如果 "该死" 出现在 "XXX 死了。该死的..." 这种情况，仍应报死
+      // 仅当 fp 单独出现时排除
+      const remaining = text.replace(fp, '').trim()
+      // 简化：如果去掉 fp 后还有 DEATH_PHRASES 命中 → 仍然算死
+      if (!DEATH_PHRASES.some(p => remaining.includes(p))) {
+        return false
+      }
+    }
+  }
+  return true
+}
+
+/**
+ * 活人动作动词（带词边界 + 排除单字歧义）。
+ *
+ * 设计：
+ *   - 修复原 LIVING_VERBS 单字列表的误报（如 "听说" 含 "说"）
+ *   - 用 2 字短语作为动词单位（"笑说"/"笑着说"/"拿起" 等）
+ *   - 边界：左侧接受 (^|中文标点|空白) 或中文汉字（避免要求必须有标点）
+ *   - 右侧接受 (中文标点|空白|汉字|EOF)—— 避免 "大笑" 误判
+ */
+const LIVING_VERB_PATTERNS: RegExp[] = [
+  // 常见动作 + 后缀词
+  /(?:^|[，。！？\s一-鿿])笑(?:着|了|么|过|吧|啊|呀|咧|起来|道|容|脸|声|嘻|嘻哈哈|$)/,
+  /(?:^|[，。！？\s一-鿿])说(?:道|着|了|过|吧|啊|呀|呢|起来|明|明道|出|出口|出口成章|$)/,
+  /(?:^|[，。！？\s一-鿿])走(?:去|来|了|过|进|出|向|到|廊|路|开|$)/,
+  /(?:^|[，。！？\s一-鿿])跑(?:去|来|了|过|向|进|步|$)/,
+  /(?:^|[，。！？\s一-鿿])站(?:着|了|起|起来|$)/,
+  /(?:^|[，。！？\s一-鿿])坐(?:下|了|起|起来|$)/,
+  /(?:^|[，。！？\s一-鿿])起身(?:来|$)/,
+  /(?:^|[，。！？\s一-鿿])睁眼(?:睛|$)/,
+  /(?:^|[，。！？\s一-鿿])挥手(?:臂|$)/,
+  /(?:^|[，。！？\s一-鿿])拿起/,
+  /(?:^|[，。！？\s一-鿿])握住/,
+  /(?:^|[，。！？\s一-鿿])拔出/,
+  /(?:^|[，。！？\s一-鿿])出拳/,
+  /(?:^|[，。！？\s一-鿿])出剑/,
+  /(?:^|[，。！？\s一-鿿])想(?:着|了|过|$)/,
+  /(?:^|[，。！？\s一-鿿])看(?:见|了|过|到|向|上|下|$)/,
+  /(?:^|[，。！？\s一-鿿])打(?:着|了|过|算|$)/,
+  /(?:^|[，。！？\s一-鿿])回(?:答|头|手|来|去|眸|$)/,
+  /(?:^|[，。！？\s一-鿿])开口(?:说|$)/,
+  /(?:^|[，。！？\s一-鿿])惊呼/,
+  /(?:^|[，。！？\s一-鿿])呐喊/,
+  /(?:^|[，。！？\s一-鿿])长叹/,
+  /(?:^|[，。！？\s一-鿿])挥剑/,
+  /(?:^|[，。！？\s一-鿿])斩向/,
+  /(?:^|[，。！？\s一-鿿])击向/,
+  /(?:^|[，。！？\s一-鿿])奔向/,
+  /(?:^|[，。！？\s一-鿿])冲(?:向|出|进|锋|天)/,
+]
+
+function lineHasLivingAction(line: string): boolean {
+  return LIVING_VERB_PATTERNS.some(p => p.test(line))
 }
 
 // ============================================================
@@ -440,8 +552,8 @@ export function checkRewriteFactSafety(
   for (const ev of timeline) {
     const summary = ev.summary || ''
     const impact = ev.impact || ''
-    const deathSignals = ['死亡', '牺牲', '身亡', '阵亡', '死', '殒命']
-    if (!deathSignals.some(s => summary.includes(s) || impact.includes(s))) continue
+    // 修复：使用 DEATH_PHRASES + DEATH_FALSE_POSITIVES 替代单字 '死'
+    if (!isActualDeathMention(summary) && !isActualDeathMention(impact)) continue
     for (const char of ev.characters || []) {
       if (char.length < 2) continue
       // 检测在 rewrite 后文中 char 是否被作为活人提到（不在闪回标记附近）
@@ -452,12 +564,12 @@ export function checkRewriteFactSafety(
         // 检查前后 50 字符内是否有闪回标记
         const window = lines.slice(Math.max(0, i - 2), i + 3).join(' / ')
         if (FLASHBACK_MARKERS.some(m => window.includes(m))) continue
-        // 检测是否在描述"已死"
-        if (deathSignals.some(s => line.includes(s + '的') || line.includes(s + '已'))) continue
-        // 简化启发式：行包含死亡角色 + 行包含任意"活人动作"动词 → 视为复活
-        const LIVING_VERBS = ['笑', '说', '想', '走', '跑', '打', '拿', '看', '睁', '站', '坐', '起', '握', '出', '回', '挥', '睁眼', '起身']
-        const hasLivingAction = LIVING_VERBS.some(v => line.includes(v))
-        if (hasLivingAction) {
+        // 检测是否在描述"已死"——用同样的 DEATH_PHRASES 判断（避免单字"死"误报成语）
+        if (isActualDeathMention(line)) continue
+        // 排除"X 死前" / "X 死后" / "X 临死" 等历史描述
+        if (/(?:死|亡|殒)(?:前|后|时|中|于|于临)/.test(line)) continue
+        // 修复：用词边界的 living verb 列表替代单字匹配
+        if (lineHasLivingAction(line)) {
           issues.push({
             severity: 'error',
             category: 'continuity',

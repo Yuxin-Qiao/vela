@@ -311,6 +311,62 @@ export interface DatabaseChannels {
   'db:canon-summary-get': { args: [chapterNumber: number]; return: CanonChapterSummary | null }
   'db:canon-summary-list-recent': { args: [limit?: number]; return: CanonChapterSummary[] }
   'db:canon-summary-upsert': { args: [summary: CanonChapterSummary]; return: { success: boolean; error?: string } }
+
+  // 原子写回（推荐路径：单次事务）
+  'db:canon-writeback-atomic': {
+    args: [payload: CanonWritebackPayload]
+    return: { success: boolean; error?: string; timelineIds?: number[]; characterStatesWritten?: number; plotIds?: number[]; factIds?: number[] }
+  }
+}
+
+// CanonWritebackPayload 与主进程 CanonRepository.writebackAtomically 入参兼容
+export interface CanonWritebackPayload {
+  chapterNumber: number
+  newEvents: Array<{
+    chapterNumber: number
+    sequence: number
+    characters: string[]
+    location: string
+    timeFlow: 'sequential' | 'flashback'
+    summary: string
+    impact: string
+  }>
+  characterDeltas: Array<{
+    character: string
+    chapterNumber: number
+    after: {
+      location?: string
+      powerLevel?: string
+      physicalState?: string
+      mentalState?: string
+      keyItems?: string
+      currentGoal?: string
+      knowledge?: string[]
+      relationships?: Record<string, string>
+      recentEvents?: string
+    }
+  }>
+  plotLineChanges?: {
+    added?: Array<{
+      name: string
+      status: 'active' | 'resolved' | 'paused'
+      startedAt: number
+      lastAdvancedAt: number
+      resolvedAt?: number
+      characters: string[]
+      currentState: string
+      description: string
+    }>
+    advanced?: Array<{ id: number; currentState: string; lastAdvancedAt: number }>
+    resolved?: number[]
+  }
+  newFacts: Array<{
+    category: 'world' | 'location' | 'item' | 'event' | 'relationship' | 'identity'
+    statement: string
+    introducedAt: number
+    characters: string[]
+    evidence?: string
+  }>
 }
 
 // ===== Canon Store 类型别名（避免 ipc-channels.ts 直接依赖 narrative-consistency） =====

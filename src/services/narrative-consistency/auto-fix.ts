@@ -75,33 +75,57 @@ export function tryAutoFix(
  * 输出格式："张三（据前文线索）知道了某件秘密"
  *
  * 保守策略：只补充来源标注，不删减原文。
+ *
+ * 修复：替换为 fixAllKnowledgeLeaks，循环处理所有 occurrence 而非仅第一处。
  */
 function fixKnowledgeLeak(
   content: string,
   evidence: string,
 ): { content: string; modified: boolean } {
-  const idx = content.indexOf(evidence)
-  if (idx < 0) return { content, modified: false }
+  return fixAllKnowledgeLeaks(content, evidence)
+}
 
-  // 在 evidence 之前插入"（据前文线索）"
-  const before = content.slice(0, idx)
-  const after = content.slice(idx)
-  // 避免重复插入
-  if (before.endsWith('（据前文线索）') || before.endsWith('（回忆中）')) {
-    return { content, modified: false }
-  }
+/**
+ * 修复 evidence 的所有出现（不仅第一次）。
+ * 原 fixKnowledgeLeak 一次只修一个位置 — 多段都有"林轩知道了 X"时只有第一段被加注。
+ */
+function fixAllKnowledgeLeaks(
+  content: string,
+  evidence: string,
+): { content: string; modified: boolean } {
+  if (!evidence) return { content, modified: false }
   const insertion = '（据前文线索）'
-  return {
-    content: before + insertion + after,
-    modified: true,
+  const insertionLen = insertion.length
+  const parts: string[] = []
+  let cursor = 0
+  let idx = content.indexOf(evidence, cursor)
+  let modified = false
+  while (idx >= 0) {
+    const beforeSlice = content.slice(Math.max(0, idx - insertionLen), idx)
+    if (beforeSlice === insertion) {
+      // 已标注
+      parts.push(content.slice(cursor, idx + evidence.length))
+      cursor = idx + evidence.length
+    } else {
+      parts.push(content.slice(cursor, idx))
+      parts.push(insertion)
+      parts.push(evidence)
+      cursor = idx + evidence.length
+      modified = true
+    }
+    idx = content.indexOf(evidence, cursor)
   }
+  if (!modified) return { content, modified: false }
+  parts.push(content.slice(cursor))
+  return { content: parts.join(''), modified: true }
 }
 
 /**
  * 修复地点瞬移：在两个地点变化的段落之间插入转场动词
- * 策略：在 evidence 段落开头插入"他/她 <verb> <newLocation>"
+ * 策略：在 evidence 段落开头插入"<角色名> <verb> <newLocation>。"
  *
- * 保守策略：只在 evidence 段落很短（<= 80 字）时插入，避免破坏原文节奏
+ * 修复：跳过标题行（避免破坏章节结构）
+ * 修复：使用角色名而不是代词"他"（避免性别假设错误）
  */
 function fixLocationJump(
   content: string,
@@ -115,22 +139,32 @@ function fixLocationJump(
   const newLocation = match?.[1]
   if (!newLocation) return { content, modified: false }
 
-  // 在 evidence 段落开头插入
-  const idx = content.indexOf(evidence)
-  if (idx < 0) return { content, modified: false }
-  const verb = FIX_TRANSITION_VERBS[Math.abs(hashStr(evidence)) % FIX_TRANSITION_VERBS.length]
-  const charName = issue.characters?.[0] || '他'
-  const insertion = `${charName}${verb}${newLocation}。\n\n`
+  // 修复：找 evidence 所在的"非标题"段落
+  const lines = content.split('\n')
+  const charName = issue.characters?.[0] || ''
+  let targetLineIdx = -1
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].includes(evidence)) {
+      if (/^\s*#/.test(lines[i])) continue  // 跳过 Markdown 标题
+      if (/^\s*第[一二三四五六七八九十百千万零〇\d]+章/.test(lines[i])) continue  // 跳过章标题
+      // 跳过短行（< 20 字符）且不含角色名的行——视为标题/引言
+      if (lines[i].length < 20 && charName && !lines[i].includes(charName)) continue
+      targetLineIdx = i
+      break
+    }
+  }
+  if (targetLineIdx < 0) return { content, modified: false }
 
-  // 避免重复插入
-  if (content.includes(insertion.slice(0, 8))) {
+  // 修复：用 issue.characters 提供的角色名，不假设"他"
+  // (charName already declared in the heading check above)
+  const verb = FIX_TRANSITION_VERBS[Math.abs(hashStr(evidence)) % FIX_TRANSITION_VERBS.length]
+  const insertion = `${charName}${verb}${newLocation}。`
+  // 去重：检查 evidence 所在段是否已含转场句
+  if (lines[targetLineIdx].includes(insertion)) {
     return { content, modified: false }
   }
-
-  return {
-    content: content.slice(0, idx) + insertion + content.slice(idx),
-    modified: true,
-  }
+  lines[targetLineIdx] = insertion + '\n' + lines[targetLineIdx]
+  return { content: lines.join('\n'), modified: true }
 }
 
 function hashStr(s: string): number {

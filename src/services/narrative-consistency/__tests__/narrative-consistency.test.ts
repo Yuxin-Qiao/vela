@@ -14,7 +14,7 @@ import { describe, it, expect } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { initProjectDatabase, closeProjectDatabase } from '../../../../electron/database'
+import { initProjectDatabase, closeProjectDatabase, getProjectDb } from '../../../../electron/database'
 import { CanonRepository } from '../../../../electron/repositories/canon-repository'
 import {
   checkLocationContinuity,
@@ -39,6 +39,8 @@ import {
   makePlotLines,
   makeFacts,
 } from './fixtures'
+import { BasePromptBuilder } from '../../prompts/prompt-builder'
+import { BUILTIN_PROMPTS } from '../../prompt-templates'
 
 // ============================================================
 // 1. 人物地点连续性
@@ -599,21 +601,27 @@ describe('CanonStore.writeback', () => {
     })
 
     expect(result.ok).toBe(true)
+    // 修复后：writeback 走原子路径，IPC 调用数从 8 降到 2
     expect(calls.map(c => c.channel)).toEqual([
       'db:canon-summary-upsert',
-      'db:canon-timeline-clear-chapter',
-      'db:canon-fact-clear-chapter',
-      'db:canon-timeline-append',
-      'db:canon-character-state-get',
-      'db:canon-character-state-upsert',
-      'db:canon-plot-add',
-      'db:canon-fact-add',
+      'db:canon-writeback-atomic',
     ])
-    const stateUpsert = calls.find(c => c.channel === 'db:canon-character-state-upsert')?.args[0] as { location: string; keyItems: string; knowledge: string[]; updatedAtChapter: number }
-    expect(stateUpsert.location).toBe('烈火宗')
-    expect(stateUpsert.keyItems).toBe('旧剑、青虹剑')
-    expect(stateUpsert.knowledge).toEqual(['师父被害'])
-    expect(stateUpsert.updatedAtChapter).toBe(5)
+    // 验证 atomic 调用的 payload 包含正确的 merge 数据
+    const atomicCall = calls.find(c => c.channel === 'db:canon-writeback-atomic')
+    expect(atomicCall).toBeDefined()
+    const payload = atomicCall!.args[0] as {
+      chapterNumber: number
+      newEvents: Array<{ chapterNumber: number; sequence: number; characters: string[]; location: string; timeFlow: string; summary: string; impact: string }>
+      characterDeltas: Array<{ character: string; after: { location?: string; keyItems?: string; knowledge?: string[] }; chapterNumber: number }>
+      plotLineChanges: { added?: Array<{ name: string }>; advanced?: unknown[]; resolved?: number[] }
+      newFacts: Array<{ category: string; statement: string; introducedAt: number; characters: string[]; evidence?: string }>
+    }
+    expect(payload.chapterNumber).toBe(5)
+    expect(payload.newEvents).toHaveLength(1)
+    expect(payload.characterDeltas[0].after.location).toBe('烈火宗')
+    expect(payload.characterDeltas[0].after.keyItems).toBe('旧剑、青虹剑')
+    expect(payload.plotLineChanges.added?.[0].name).toBe('对抗赵无极')
+    expect(payload.newFacts[0].statement).toBe('林轩获得青虹剑')
   })
 })
 
@@ -702,5 +710,192 @@ describe('CanonRepository SQLite persistence', () => {
       closeProjectDatabase()
       rmSync(projectDir, { recursive: true, force: true })
     }
+  })
+})
+
+// ============================================================
+// 回归测试 (Regression Suite)
+// 防止 PR #13 审计发现的 23 个真实 bug 再次出现
+// 每个 case 对应一个 issue 编号
+// ============================================================
+
+describe('回归测试：审计发现的 bug 修复验证', () => {
+  // F1: knowledge merge（不能覆盖旧 knowledge）
+  it('F1: 多次 upsert character state 应累积 knowledge 列表', () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'vela-rf-'))
+    try {
+      initProjectDatabase(projectDir)
+      CanonRepository.upsertCharacterState({
+        character: '林轩', location: '', powerLevel: '', physicalState: '', mentalState: '',
+        keyItems: '', currentGoal: '', knowledge: ['秘密A', '秘密B'],
+        relationships: {}, recentEvents: '', updatedAtChapter: 1, updatedAt: '2025-01-01T00:00:00Z',
+      })
+      CanonRepository.upsertCharacterState({
+        character: '林轩', location: '', powerLevel: '', physicalState: '', mentalState: '',
+        keyItems: '', currentGoal: '', knowledge: ['秘密C'],
+        relationships: {}, recentEvents: '', updatedAtChapter: 2, updatedAt: '2025-01-02T00:00:00Z',
+      })
+      const stored = CanonRepository.getCharacterState('林轩')
+      expect(stored?.knowledge).toEqual(['秘密A', '秘密B', '秘密C'])
+    } finally { closeProjectDatabase(); rmSync(projectDir, { recursive: true, force: true }) }
+  })
+
+  // F2: deathSignals 误报中文成语
+  it('F2: 死灰复燃/视死如归 等成语不应触发"复活"error', () => {
+    const canon = makeCanon({
+      timeline: makeTimeline([{
+        chapterNumber: 1, sequence: 1,
+        summary: '林轩师父被赵无极杀死', impact: '',
+        characters: ['林轩'],
+      }]),
+    })
+    const text1 = '林轩死灰复燃地站起来。'
+    const text2 = '林轩视死如归地冲上前。'
+    const text3 = '林轩听说这件事，死死的攥紧了拳头。'
+    expect(checkRewriteFactSafety(text1, canon.timeline, canon.knownFacts).filter(i => i.severity === 'error')).toHaveLength(0)
+    expect(checkRewriteFactSafety(text2, canon.timeline, canon.knownFacts).filter(i => i.severity === 'error')).toHaveLength(0)
+    expect(checkRewriteFactSafety(text3, canon.timeline, canon.knownFacts).filter(i => i.severity === 'error')).toHaveLength(0)
+  })
+
+  // F4/F13: writeback 必须用原子事务
+  it('F4/F13: writeback 必须用单次 db:canon-writeback-atomic IPC（非 7+ 顺序调用）', async () => {
+    const calls: Array<{ channel: string }> = []
+    const fakeIpc = {
+      async invoke(channel: string) {
+        calls.push({ channel })
+        if (channel === 'db:canon-writeback-atomic') return { success: true }
+        return { success: true }
+      },
+    }
+    const store = new CanonStore(fakeIpc as any)
+    await store.writeback({
+      chapterNumber: 1, chapterTitle: '第一章',
+      chapterSummary: 'summary',
+      newEvents: [{ chapterNumber: 1, sequence: 1, characters: ['X'], location: 'A', timeFlow: 'sequential', summary: 'e', impact: '' }],
+      characterDeltas: [], plotLineChanges: {}, newFacts: [],
+    })
+    const channels = calls.map(c => c.channel)
+    expect(channels).toContain('db:canon-writeback-atomic')
+    expect(channels).not.toContain('db:canon-timeline-clear-chapter')  // 旧路径已废弃
+    expect(channels).not.toContain('db:canon-timeline-append')  // 旧路径已废弃
+  })
+
+  // F6: safeParse 必须抛错而不是静默吞 JSON 错
+  it('F6: corrupt JSON in DB should throw (not silently return empty)', () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'vela-rf-'))
+    try {
+      initProjectDatabase(projectDir)
+      const db = getProjectDb()
+      db.prepare(`INSERT INTO canon_character_state (character, knowledge_json) VALUES (?, ?)`).run('林轩', '[corrupted')
+      expect(() => CanonRepository.getCharacterState('林轩')).toThrow(/数据已损坏/)
+    } finally { closeProjectDatabase(); rmSync(projectDir, { recursive: true, force: true }) }
+  })
+
+  // F7: addFact dedup（大小写/空格不敏感）
+  it('F7: addFact 应当用规范化去重 (大小写/空格不敏感)', () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'vela-rf-'))
+    try {
+      initProjectDatabase(projectDir)
+      const id1 = CanonRepository.addFact({ category: 'identity', statement: 'X 是 Y', introducedAt: 1, characters: [], evidence: '' })
+      const id2 = CanonRepository.addFact({ category: 'identity', statement: 'x 是 y', introducedAt: 1, characters: [], evidence: '' })
+      const id3 = CanonRepository.addFact({ category: 'identity', statement: 'X  是  Y', introducedAt: 1, characters: [], evidence: '' })
+      const id4 = CanonRepository.addFact({ category: 'identity', statement: 'X 是 Y', introducedAt: 1, characters: [], evidence: '' })
+      expect(id1).toBe(id2)
+      expect(id1).toBe(id3)
+      expect(id1).toBe(id4)
+    } finally { closeProjectDatabase(); rmSync(projectDir, { recursive: true, force: true }) }
+  })
+
+  // F8: timeline sequence 应有 UNIQUE 约束
+  it('F8: 同一 (chapter, sequence) 第二次 append 应覆盖而非重复插入', () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'vela-rf-'))
+    try {
+      initProjectDatabase(projectDir)
+      CanonRepository.appendTimelineEvent({ chapterNumber: 1, sequence: 1, characters: ['A'], location: 'X', timeFlow: 'sequential', summary: 'first', impact: '' })
+      CanonRepository.appendTimelineEvent({ chapterNumber: 1, sequence: 1, characters: ['B'], location: 'Y', timeFlow: 'sequential', summary: 'second', impact: '' })
+      const events = CanonRepository.getTimelineByChapter(1)
+      expect(events).toHaveLength(1)
+      expect(events[0].summary).toBe('second')  // 第二次覆盖了第一次
+    } finally { closeProjectDatabase(); rmSync(projectDir, { recursive: true, force: true }) }
+  })
+
+  // F12/F29: prompt builder 必须转义 value 中的 {{}}
+  it('F12/F29: prompt builder 必须转义用户数据中的 {{xxx}} 模板变量', () => {
+    const template = BUILTIN_PROMPTS.find((p: any) => p.key === 'next_chapter_draft')
+    const builder = new BasePromptBuilder(template)
+    const maliciousValue = '恶意：{{chapter_title}} 应该被替换为敏感内容'
+    builder.withCanonContext(maliciousValue)
+    const built = builder.build()
+    // {{}} 应该被转义为 ⦃⦃⦄⦄，不能再作为模板变量被替换
+    expect(built).not.toMatch(/\{\{chapter_title\}\}/)
+    expect(built).toMatch(/⦃⦃chapter_title⦄⦄/)
+  })
+
+  // F15/F28: auto-fix 必须处理 evidence 的所有出现
+  it('F15/F28: tryAutoFix 应标记 evidence 的所有出现（不仅第一处）', () => {
+    const issues = [{
+      severity: 'warning' as const, category: 'knowledge' as const,
+      characters: ['林轩'], message: 'k1', evidence: '林轩知道了秘密',
+    }]
+    const text = '第一段：林轩知道了秘密。\n\n第二段：林轩知道了秘密，立刻出发。'
+    const result = tryAutoFix(text, issues)
+    const insertCount = (result.content.match(/（据前文线索）/g) || []).length
+    expect(insertCount).toBe(2)  // 两处都应该被标注
+  })
+
+  // F18: 多个 issues 同样 evidence 都应处理
+  it('F18: 多个 issues 同样 evidence 都应触发插入', () => {
+    const issues = [
+      { severity: 'warning' as const, category: 'knowledge' as const, characters: ['林轩'], message: 'k1', evidence: '林轩知道了秘密' },
+      { severity: 'warning' as const, category: 'knowledge' as const, characters: ['林轩'], message: 'k2', evidence: '林轩知道了秘密' },
+    ]
+    const text = 'A段：林轩知道了秘密。\n\nB段：林轩知道了秘密，立刻出发。'
+    const result = tryAutoFix(text, issues)
+    const insertCount = (result.content.match(/（据前文线索）/g) || []).length
+    expect(insertCount).toBeGreaterThanOrEqual(2)
+  })
+
+  // F31: stateSignals 必须含常见动词
+  it('F31: stateSignals 应覆盖"飞/遁/跳/望/听"等常见动词', () => {
+    const extracted = extractCanonWriteback({
+      chapterNumber: 1, chapterTitle: '第一章',
+      chapterContent: '林轩飞向天元城。',
+      characters: [{ name: '林轩', role: 'protagonist', currentState: { location: '青云山' } }],
+    })
+    const linXuan = extracted.characterDeltas.find(d => d.character === '林轩')
+    expect(linXuan).toBeDefined()  // 之前 "飞" 不在列表里 → delta 不生成
+  })
+
+  // F33: fixLocationJump 不能破坏章节结构
+  it('F33: fixLocationJump 不应插入到标题行/章节标题之前', () => {
+    const issues = [{
+      severity: 'warning' as const, category: 'location' as const, characters: ['林轩'],
+      message: '地点从「青云山」变为「烈火宗」',
+      evidence: '在烈火宗激战',
+    }]
+    // 标题 + evidence 在标题行
+    const text = '在烈火宗激战。\n\n【第一节】林轩在青云山练剑。'
+    const result = tryAutoFix(text, issues)
+    // 不应修改（evidence 在标题行），或修改后不会破坏【第一节】的位置
+    if (result.modified) {
+      // 修改了的话，【第一节】必须在插入的内容之后
+      const titleIdx = result.content.indexOf('【第一节】')
+      const insertIdx = result.content.indexOf('林轩')
+      expect(insertIdx).toBeGreaterThan(titleIdx)
+    }
+  })
+
+  // F33b: 正常 narrative line 上 fixLocationJump 应工作
+  it('F33b: fixLocationJump 在 narrative line 上应正常插入转场', () => {
+    const issues = [{
+      severity: 'warning' as const, category: 'location' as const, characters: ['林轩'],
+      message: '地点从「青云山」变为「烈火宗」',
+      evidence: '林轩在烈火宗激战',
+    }]
+    const text = '【第一节】林轩在青云山告别。\n\n林轩在烈火宗激战。'
+    const result = tryAutoFix(text, issues)
+    expect(result.modified).toBe(true)
+    // 至少一个转场动词被插入
+    expect(/林轩(?:来到|抵达|前往|赶往)烈火宗/.test(result.content)).toBe(true)
   })
 })

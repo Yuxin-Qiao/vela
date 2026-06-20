@@ -189,12 +189,18 @@ export class CanonStore {
 
   /**
    * 执行章节写回（包含 timeline 事件、角色状态 delta、剧情线变更、事实、摘要）。
-   * 设计目标：失败不阻塞定稿主流程；逐项吞掉异常。
+   *
+   * 设计目标（v2，原子写回）：
+   *   - 主进程用单次 SQLite 事务完成 timeline clear+insert / fact clear+insert /
+   *     character state merge / plot line / fact 追加
+   *   - 任何一步失败 → 整个事务回滚，绝不出现"清空但没写入"的丢失
+   *   - 摘要在事务外单独写入（失败不阻塞）
+   *   - 单次 IPC 调用 vs 旧的 10+ 次 roundtrip
    */
   async writeback(payload: CanonWriteback): Promise<{ ok: boolean; errors: string[] }> {
     const errors: string[] = []
 
-    // 1) 摘要
+    // 1) 摘要（独立写入，失败不阻塞定稿）
     if (payload.chapterSummary) {
       try {
         await this.upsertSummary({
@@ -206,55 +212,20 @@ export class CanonStore {
       } catch (e) { errors.push(`summary: ${String(e)}`) }
     }
 
-    // 2) 清理本章已存在的旧事件/事实（确保重写时不会出现重复/旧版本）
-    await this.clearChapterTimeline(payload.chapterNumber)
-    await this.clearChapterFacts(payload.chapterNumber)
-
-    // 3) 新增事件
-    for (const ev of payload.newEvents || []) {
-      const id = await this.appendTimelineEvent(ev)
-      if (id === null) errors.push(`event#${ev.sequence}`)
-    }
-
-    // 4) 角色状态 delta
-    for (const delta of payload.characterDeltas || []) {
-      const now = new Date().toISOString()
-      // 合并 after 到已有状态
-      const prev = await this.getCharacterState(delta.character)
-      const merged: CharacterStateSnapshot = {
-        character: delta.character,
-        location: delta.after.location ?? prev?.location ?? '',
-        powerLevel: delta.after.powerLevel ?? prev?.powerLevel ?? '',
-        physicalState: delta.after.physicalState ?? prev?.physicalState ?? '',
-        mentalState: delta.after.mentalState ?? prev?.mentalState ?? '',
-        keyItems: delta.after.keyItems ?? prev?.keyItems ?? '',
-        currentGoal: delta.after.currentGoal ?? prev?.currentGoal ?? '',
-        knowledge: delta.after.knowledge ?? prev?.knowledge ?? [],
-        relationships: delta.after.relationships ?? prev?.relationships ?? {},
-        recentEvents: delta.after.recentEvents ?? prev?.recentEvents ?? '',
-        updatedAtChapter: delta.chapterNumber,
-        updatedAt: now,
+    // 2) 主路径：单次原子 IPC
+    try {
+      const r = await this.ipcClient.invoke('db:canon-writeback-atomic', {
+        chapterNumber: payload.chapterNumber,
+        newEvents: payload.newEvents,
+        characterDeltas: payload.characterDeltas,
+        plotLineChanges: payload.plotLineChanges,
+        newFacts: payload.newFacts,
+      }) as { success: boolean; error?: string } | undefined
+      if (!r?.success) {
+        errors.push(`writeback-atomic: ${r?.error || 'unknown'}`)
       }
-      const ok = await this.upsertCharacterState(merged)
-      if (!ok) errors.push(`char-state:${delta.character}`)
-    }
-
-    // 5) 剧情线变更
-    for (const line of payload.plotLineChanges?.added || []) {
-      const id = await this.addPlotLine(line)
-      if (id === null) errors.push(`plot-add:${line.name}`)
-    }
-    for (const adv of payload.plotLineChanges?.advanced || []) {
-      await this.advancePlotLine(adv.id, adv.currentState, adv.lastAdvancedAt)
-    }
-    for (const id of payload.plotLineChanges?.resolved || []) {
-      await this.resolvePlotLine(id, payload.chapterNumber)
-    }
-
-    // 6) 新增事实
-    for (const fact of payload.newFacts || []) {
-      const id = await this.addFact(fact)
-      if (id === null) errors.push(`fact:${fact.statement.slice(0, 20)}`)
+    } catch (e) {
+      errors.push(`writeback-atomic: ${String(e)}`)
     }
 
     return { ok: errors.length === 0, errors }

@@ -27,6 +27,8 @@ export function initProjectDatabase(projectPath: string): void {
 
   // 创建表结构
   createTables(projectDb)
+  // 对老库执行 schema 迁移（加 UNIQUE 约束等）
+  migrateProjectDatabase(projectDb)
   console.log(`[Vela DB] 项目数据库已打开: ${dbPath}`)
 }
 
@@ -36,6 +38,77 @@ export function closeProjectDatabase(): void {
     projectDb.close()
     projectDb = null
   }
+}
+
+/** 已执行的 schema 迁移版本号（用于幂等迁移） */
+const SCHEMA_VERSION = 1
+
+/** 对老库执行 schema 迁移（加 UNIQUE/CHECK 约束等） */
+function migrateProjectDatabase(db: BetterSqlite3.Database): void {
+  const currentVersionRow = db.prepare(
+    `PRAGMA user_version`
+  ).get() as { user_version: number } | undefined
+  const currentVersion = currentVersionRow?.user_version ?? 0
+  if (currentVersion >= SCHEMA_VERSION) return
+
+  // v0 → v1: 给 canon 表加约束（仅当索引不存在时）
+  if (currentVersion < 1) {
+    const timelineUnique = db.prepare(
+      `SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_canon_timeline_unique'`
+    ).get()
+    if (!timelineUnique) {
+      // 注意：先尝试 CREATE UNIQUE INDEX；若有重复数据会失败，需要清理
+      try {
+        // 清理重复 sequence，保留 id 最小的那条
+        db.exec(`
+          DELETE FROM canon_timeline_events
+          WHERE id NOT IN (
+            SELECT MIN(id) FROM canon_timeline_events
+            GROUP BY chapter_number, sequence
+          )
+        `)
+        db.exec(`CREATE UNIQUE INDEX idx_canon_timeline_unique ON canon_timeline_events(chapter_number, sequence)`)
+      } catch (e) {
+        console.warn('[Vela DB] 添加 canon_timeline unique 约束失败（可能存在冲突数据）:', e)
+      }
+    }
+    const factsUnique = db.prepare(
+      `SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_canon_facts_unique'`
+    ).get()
+    if (!factsUnique) {
+      try {
+        db.exec(`
+          DELETE FROM canon_facts
+          WHERE id NOT IN (
+            SELECT MIN(id) FROM canon_facts
+            WHERE statement IS NOT NULL AND statement != ''
+            GROUP BY LOWER(TRIM(statement))
+          )
+        `)
+        db.exec(`CREATE UNIQUE INDEX idx_canon_facts_unique ON canon_facts(statement COLLATE NOCASE)`)
+      } catch (e) {
+        console.warn('[Vela DB] 添加 canon_facts unique 约束失败:', e)
+      }
+    }
+    const plotUnique = db.prepare(
+      `SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_canon_plot_unique'`
+    ).get()
+    if (!plotUnique) {
+      try {
+        db.exec(`
+          DELETE FROM canon_plot_lines
+          WHERE id NOT IN (
+            SELECT MIN(id) FROM canon_plot_lines
+            GROUP BY LOWER(TRIM(name))
+          )
+        `)
+        db.exec(`CREATE UNIQUE INDEX idx_canon_plot_unique ON canon_plot_lines(name COLLATE NOCASE)`)
+      } catch (e) {
+        console.warn('[Vela DB] 添加 canon_plot unique 约束失败:', e)
+      }
+    }
+  }
+  db.pragma(`user_version = ${SCHEMA_VERSION}`)
 }
 
 /** 获取当前数据库实例 */

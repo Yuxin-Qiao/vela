@@ -14,6 +14,15 @@ import { PostProcessRepository } from '../repositories/post-process-repository'
 import { LLMHistoryRepository } from '../repositories/llm-repository'
 import { SummaryRepository } from '../repositories/summary-repository'
 import { CanonRepository } from '../repositories/canon-repository'
+import {
+  safeValidate,
+  validateCanonTimelineEventInput,
+  validateCanonFactInput,
+  validateCanonPlotLineInput,
+  validateCanonCharacterStateSnapshot,
+  validateCanonChapterSummary,
+  validateCanonWritebackPayload,
+} from '../ipc-validation'
 import type {
   TimelineEvent,
   CharacterStateSnapshot,
@@ -364,8 +373,10 @@ ipcMain.handle('db:revision-create', async (_event, params: {
     return CanonRepository.getTimelineByChapter(chapterNumber)
   })
   ipcMain.handle('db:canon-timeline-append', async (_event, event: Omit<TimelineEvent, 'id' | 'createdAt'>) => {
+    const v = safeValidate(validateCanonTimelineEventInput, event)
+    if (!v.ok) return { success: false, error: v.error }
     try {
-      const id = CanonRepository.appendTimelineEvent(event)
+      const id = CanonRepository.appendTimelineEvent(v.data)
       return { success: true, id }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -384,8 +395,10 @@ ipcMain.handle('db:revision-create', async (_event, params: {
     return CanonRepository.getCharacterState(character)
   })
   ipcMain.handle('db:canon-character-state-upsert', async (_event, snapshot: CharacterStateSnapshot) => {
+    const v = safeValidate(validateCanonCharacterStateSnapshot, snapshot)
+    if (!v.ok) return { success: false, error: v.error }
     try {
-      CanonRepository.upsertCharacterState(snapshot)
+      CanonRepository.upsertCharacterState(v.data)
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -397,8 +410,10 @@ ipcMain.handle('db:revision-create', async (_event, params: {
     return CanonRepository.getPlotLines(status ? { status } : undefined)
   })
   ipcMain.handle('db:canon-plot-add', async (_event, line: Omit<PlotLine, 'id'>) => {
+    const v = safeValidate(validateCanonPlotLineInput, line)
+    if (!v.ok) return { success: false, error: v.error }
     try {
-      const id = CanonRepository.addPlotLine(line)
+      const id = CanonRepository.addPlotLine(v.data)
       return { success: true, id }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -418,8 +433,10 @@ ipcMain.handle('db:revision-create', async (_event, params: {
     return CanonRepository.getFacts()
   })
   ipcMain.handle('db:canon-fact-add', async (_event, fact: Omit<Fact, 'id'>) => {
+    const v = safeValidate(validateCanonFactInput, fact)
+    if (!v.ok) return { success: false, error: v.error }
     try {
-      const id = CanonRepository.addFact(fact)
+      const id = CanonRepository.addFact(v.data)
       return { success: true, id }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -438,10 +455,35 @@ ipcMain.handle('db:revision-create', async (_event, params: {
     return CanonRepository.getRecentSummaries(limit ?? 5)
   })
   ipcMain.handle('db:canon-summary-upsert', async (_event, summary: ChapterSummary) => {
+    const v = safeValidate(validateCanonChapterSummary, summary)
+    if (!v.ok) return { success: false, error: v.error }
     try {
-      CanonRepository.upsertSummary(summary)
+      CanonRepository.upsertSummary(v.data)
       return { success: true }
     } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  // 原子写回（推荐路径：单次事务）
+  ipcMain.handle('db:canon-writeback-atomic', async (_event, payload: {
+    chapterNumber: number
+    newEvents: Omit<TimelineEvent, 'id' | 'createdAt'>[]
+    characterDeltas: Array<{ character: string; after: Partial<CharacterStateSnapshot>; chapterNumber: number }>
+    plotLineChanges?: {
+      added?: Omit<PlotLine, 'id'>[]
+      advanced?: Array<{ id: number; currentState: string; lastAdvancedAt: number }>
+      resolved?: number[]
+    }
+    newFacts: Omit<Fact, 'id'>[]
+  }) => {
+    const v = safeValidate(validateCanonWritebackPayload, payload)
+    if (!v.ok) return { success: false, error: v.error }
+    try {
+      const result = CanonRepository.writebackAtomically(v.data)
+      return { success: true, ...result }
+    } catch (err) {
+      console.error('[db:canon-writeback-atomic] failed:', err)
       return { success: false, error: String(err) }
     }
   })
